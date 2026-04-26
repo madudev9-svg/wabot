@@ -13,36 +13,9 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const orderStates = {};
 const menuCache = {};
-const notifiedOrderStatuses = {};
+const lastKnownStatuses = {};
 
 let dbStatusListenerStarted = false;
-
-async function getMenuFromApp() {
-  try {
-    const response = await fetch(`${FIREBASE_URL}/dishes.json`);
-    const data = await response.json();
-
-    if (!data) return [];
-
-    return Object.keys(data).map(key => ({
-      id: key,
-      name: data[key].name,
-      price: data[key].price,
-      imageUrl: data[key].imageUrl || ""
-    }));
-  } catch (error) {
-    console.error("Failed to fetch plant catalog:", error);
-    return [];
-  }
-}
-
-function getMessageText(msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    ""
-  );
-}
 
 function cleanPhoneNumber(phone) {
   if (!phone) return "";
@@ -53,16 +26,107 @@ function makeOrderId(firebaseId) {
   return `#${firebaseId.substring(1, 7).toUpperCase()}`;
 }
 
-function statusMessage(status) {
-  const messages = {
-    Placed: "ඔයාගේ order එක confirm වෙලා තියෙනවා. 🌿",
-    Preparing: "ඔයාගේ පැල order එක pack කරනවා. 🪴",
-    Packing: "ඔයාගේ පැල order එක pack කරනවා. 🪴",
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    return res;
+  } catch (error) {
+    clearTimeout(timer);
+    throw error;
+  }
+}
+
+async function firebaseGet(path) {
+  const res = await fetchWithTimeout(`${FIREBASE_URL}/${path}.json`, {}, 30000);
+  if (!res.ok) throw new Error(`Firebase GET failed: ${res.status}`);
+  return await res.json();
+}
+
+async function firebasePost(path, data) {
+  const res = await fetchWithTimeout(
+    `${FIREBASE_URL}/${path}.json`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    },
+    30000
+  );
+
+  if (!res.ok) throw new Error(`Firebase POST failed: ${res.status}`);
+  return await res.json();
+}
+
+async function firebasePatch(path, data) {
+  const res = await fetchWithTimeout(
+    `${FIREBASE_URL}/${path}.json`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data)
+    },
+    30000
+  );
+
+  if (!res.ok) throw new Error(`Firebase PATCH failed: ${res.status}`);
+  return await res.json();
+}
+
+function getStatusSinhala(status) {
+  const map = {
+    Placed: "ඔයාගේ order එක confirm වෙලා තියෙනවා. අපි ඉක්මනින් process කරනවා. 🌿",
+    Preparing: "ඔයාගේ පැල order එක ලෑස්ති කරමින් තියෙනවා. 🪴",
+    Packing: "ඔයාගේ පැල order එක pack කරමින් තියෙනවා. 📦",
     "Out for Delivery": "ඔයාගේ order එක delivery සඳහා පිටත් කරලා තියෙනවා. 🚚",
-    Delivered: "ඔයාගේ order එක deliver කරලා තියෙනවා. ✅"
+    Delivered: "ඔයාගේ order එක සාර්ථකව deliver කරලා තියෙනවා. ✅"
   };
 
-  return messages[status] || `ඔයාගේ order status එක: ${status}`;
+  return map[status] || `ඔයාගේ order status එක දැන්: ${status}`;
+}
+
+function getStatusEmoji(status) {
+  const map = {
+    Placed: "📝",
+    Preparing: "🪴",
+    Packing: "📦",
+    "Out for Delivery": "🚚",
+    Delivered: "✅"
+  };
+
+  return map[status] || "📦";
+}
+
+function getMessageText(msg) {
+  return (
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    ""
+  );
+}
+
+async function getMenuFromApp() {
+  try {
+    const data = await firebaseGet("dishes");
+
+    if (!data) return [];
+
+    return Object.keys(data).map(key => ({
+      id: key,
+      name: data[key].name,
+      price: data[key].price,
+      imageUrl: data[key].imageUrl || ""
+    }));
+  } catch (error) {
+    console.error("Failed to fetch plant catalog:", error.message);
+    return [];
+  }
 }
 
 async function sendTextMenu(sock, sender) {
@@ -127,24 +191,23 @@ Price: *Rs${item.price}*
 
 async function getCustomerOrders(customerWaNumber) {
   try {
-    const data = await fetch(`${FIREBASE_URL}/orders.json`).then(r => r.json());
-
+    const data = await firebaseGet("orders");
     if (!data) return [];
+
+    const currentPhone = cleanPhoneNumber(customerWaNumber);
 
     return Object.entries(data)
       .map(([id, order]) => ({ id, ...order }))
       .filter(order => {
         const savedPhone = cleanPhoneNumber(order.phone);
-        const currentPhone = cleanPhoneNumber(customerWaNumber);
-
         return (
           savedPhone === currentPhone ||
-          order.userId === `whatsapp_${customerWaNumber}`
+          order.userId === `whatsapp_${currentPhone}`
         );
       })
       .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
   } catch (error) {
-    console.error("Get customer orders error:", error);
+    console.error("Get customer orders error:", error.message);
     return [];
   }
 }
@@ -154,24 +217,28 @@ async function sendCustomerStatus(sock, sender, customerWaNumber) {
 
   if (orders.length === 0) {
     await sock.sendMessage(sender, {
-      text: "📦 ඔයාගේ WhatsApp number එකට order එකක් හමු වුණේ නැහැ.\n\nOrder කරන්න *menu* කියලා type කරන්න."
+      text:
+`📦 ඔයාගේ WhatsApp number එකට order එකක් හමු වුණේ නැහැ.
+
+Order කරන්න *menu* කියලා type කරන්න.`
     });
     return;
   }
 
   const latest = orders[0];
+  const status = latest.status || "Placed";
   const items = latest.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "No items";
 
   await sock.sendMessage(sender, {
     text:
-`📦 *Your Latest Order Status*
+`${getStatusEmoji(status)} *Magiflora Order Status*
 
 Order ID: ${makeOrderId(latest.id)}
 Items: ${items}
 Total: Rs${latest.total}
-Status: *${latest.status || "Placed"}*
+Status: *${status}*
 
-${statusMessage(latest.status || "Placed")}
+${getStatusSinhala(status)}
 
 Status බලන්න anytime *status* කියලා type කරන්න.`
   });
@@ -187,7 +254,7 @@ async function askAI(userText, customerName, menuItems = []) {
     : "No plants are currently listed.";
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
@@ -203,27 +270,18 @@ async function askAI(userText, customerName, menuItems = []) {
             content: `
 You are Magiflora's WhatsApp AI assistant.
 
-Customer WhatsApp name:
-${customerName || "Customer"}
+Customer name: ${customerName || "Customer"}
 
 Business:
 Magiflora sells plants, indoor plants, outdoor plants, flowering plants, pots, fertilizers, soil, and garden items.
 
-LANGUAGE RULES:
-- If customer writes Sinhala, reply in natural Sri Lankan Sinhala.
-- If customer writes Singlish, reply in natural Singlish.
-- If customer writes English, reply in simple English.
+Rules:
+- Reply in natural Sri Lankan Sinhala, Singlish, or English based on customer language.
 - Keep replies short and WhatsApp-friendly.
-- Use Sri Lankan friendly shop assistant tone.
-- Do not invent prices or unavailable products.
-- Use only the catalog below for prices and availability.
-
-Order rule:
-If customer wants to order, tell them:
-Type *menu* and reply the item number, or type *order [plant name]*.
-
-Status rule:
-If customer asks about order status, tell them to type *status*.
+- Do not invent prices.
+- Use only current catalog for prices.
+- If customer asks order status, tell them to type *status*.
+- If customer wants to order, tell them to type *menu* and reply item number.
 
 Current catalog:
 ${menuText}
@@ -232,7 +290,7 @@ ${menuText}
           { role: "user", content: userText }
         ]
       })
-    });
+    }, 30000);
 
     const data = await response.json();
 
@@ -244,9 +302,39 @@ ${menuText}
     return data.choices?.[0]?.message?.content ||
       "මට ඒක හරියට තේරුණේ නැහැ. පැල list එක බලන්න *menu* කියලා type කරන්න.";
   } catch (error) {
-    console.error("AI request failed:", error);
+    console.error("AI request failed:", error.message);
     return "Sorry, AI service එකට connect වෙන්න බැරි වුණා. ටිකකින් නැවත try කරන්න.";
   }
+}
+
+async function sendStatusUpdateToCustomer(sock, id, order, oldStatus, newStatus) {
+  const phone = cleanPhoneNumber(order.phone);
+  if (!phone) return;
+
+  const jid = `${phone}@s.whatsapp.net`;
+  const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
+
+  await sock.sendMessage(jid, {
+    text:
+`${getStatusEmoji(newStatus)} *Magiflora Order Update* 🌿
+
+Order ID: ${makeOrderId(id)}
+Items: ${items}
+
+Previous Status: ${oldStatus || "Placed"}
+New Status: *${newStatus}*
+
+${getStatusSinhala(newStatus)}
+
+Thank you for ordering from Magiflora. 🪴`
+  });
+
+  await firebasePatch(`orders/${id}`, {
+    lastNotifiedStatus: newStatus,
+    lastNotifiedAt: new Date().toISOString()
+  });
+
+  console.log(`✅ Auto status message sent to ${phone}: ${newStatus}`);
 }
 
 function listenOrderStatusChanges(sock) {
@@ -257,48 +345,38 @@ function listenOrderStatusChanges(sock) {
 
   setInterval(async () => {
     try {
-      const orders = await fetch(`${FIREBASE_URL}/orders.json`).then(r => r.json());
+      const orders = await firebaseGet("orders");
       if (!orders) return;
 
       for (const [id, order] of Object.entries(orders)) {
         if (!order.phone || !order.status) continue;
 
-        const phone = cleanPhoneNumber(order.phone);
-        if (!phone) continue;
+        const currentStatus = order.status;
+        const previousStatus = lastKnownStatuses[id];
 
-        const status = order.status;
-        const notifyKey = `${id}_${status}`;
-
-        if (notifiedOrderStatuses[notifyKey]) continue;
-
-        if (status === "Placed") {
-          notifiedOrderStatuses[notifyKey] = true;
+        if (!previousStatus) {
+          lastKnownStatuses[id] = currentStatus;
           continue;
         }
 
-        const jid = `${phone}@s.whatsapp.net`;
-        const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
+        if (previousStatus !== currentStatus) {
+          lastKnownStatuses[id] = currentStatus;
 
-        await sock.sendMessage(jid, {
-          text:
-`📦 *Magiflora Order Update* 🌿
+          if (order.lastNotifiedStatus === currentStatus) continue;
 
-Order ID: ${makeOrderId(id)}
-Items: ${items}
-New Status: *${status}*
-
-${statusMessage(status)}
-
-Thank you for ordering from Magiflora. 🪴`
-        });
-
-        notifiedOrderStatuses[notifyKey] = true;
-        console.log(`✅ Status update sent to ${phone}: ${status}`);
+          await sendStatusUpdateToCustomer(
+            sock,
+            id,
+            order,
+            previousStatus,
+            currentStatus
+          );
+        }
       }
     } catch (error) {
       console.log("Status listener error:", error.message);
     }
-  }, 15000);
+  }, 30000);
 }
 
 async function startBot() {
@@ -391,38 +469,37 @@ async function startBot() {
           status: "Placed",
           method: "Cash on Delivery (WhatsApp)",
           source: "WhatsApp Bot",
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          lastNotifiedStatus: "Placed"
         };
 
         try {
-          await fetch(`${FIREBASE_URL}/orders.json`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(plantOrder)
-          });
-        } catch (error) {
-          console.log("Firebase Order Save Error:", error);
-          await sock.sendMessage(sender, {
-            text: "❌ Sorry, order එක save කරන්න බැරි වුණා. කරුණාකර නැවත try කරන්න."
-          });
-          return;
-        }
+          const saved = await firebasePost("orders", plantOrder);
+          const orderId = saved?.name || "new";
 
-        await sock.sendMessage(sender, {
-          text:
+          await sock.sendMessage(sender, {
+            text:
 `✅ *Order Placed Successfully!* 🌿
 
 Thank you ${customerName}!
 Your order for *${item.name}* is confirmed.
 
-*Total:* Rs${plantOrder.total}
-*Payment:* Cash on Delivery
-*Status:* Placed
+Order ID: ${orderId !== "new" ? makeOrderId(orderId) : "Pending"}
+Total: Rs${plantOrder.total}
+Payment: Cash on Delivery
+Status: *Placed*
 
 📦 Status බලන්න *status* කියලා type කරන්න.
 
 අපි ඉක්මනින්ම ඔබගේ පැල order එක process කරන්නම්. 🪴`
-        });
+          });
+        } catch (error) {
+          console.log("Firebase Order Save Error:", error.message);
+          await sock.sendMessage(sender, {
+            text: "❌ Sorry, order එක save කරන්න බැරි වුණා. කරුණාකර නැවත try කරන්න."
+          });
+          return;
+        }
 
         delete orderStates[sender];
         return;
@@ -561,7 +638,7 @@ Available plants බලන්න *menu* කියලා type කරන්න. �
       await sock.sendMessage(sender, { text: aiReply });
 
     } catch (error) {
-      console.error("Message Handler Error:", error);
+      console.error("Message Handler Error:", error.message);
     }
   });
 }
