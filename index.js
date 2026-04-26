@@ -15,6 +15,13 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const userSessions = {};
 let dbStatusListenerStarted = false;
 
+// Default Bot Settings (In case Firebase is unreachable)
+const DEFAULT_SETTINGS = {
+  botName: "Magiflora AI",
+  deliveryFee: 50,
+  systemPrompt: "You are a friendly botanical assistant. Speak in friendly Sinhala/Singlish. Use emojis."
+};
+
 // ---------------------------------------------------------
 // Helper Functions
 // ---------------------------------------------------------
@@ -133,6 +140,23 @@ async function getMenuFromApp() {
   }
 }
 
+// Fetch Bot Settings from Firebase dynamically
+async function getBotSettings() {
+  try {
+    const settings = await firebaseGet("botSettings");
+    if (settings) {
+      return {
+        botName: settings.botName || DEFAULT_SETTINGS.botName,
+        deliveryFee: settings.deliveryFee !== undefined ? parseFloat(settings.deliveryFee) : DEFAULT_SETTINGS.deliveryFee,
+        systemPrompt: settings.systemPrompt || DEFAULT_SETTINGS.systemPrompt
+      };
+    }
+  } catch (error) {
+    console.error("Failed to fetch bot settings, using defaults.", error.message);
+  }
+  return DEFAULT_SETTINGS;
+}
+
 // ---------------------------------------------------------
 // Cart & Menu Display Helpers
 // ---------------------------------------------------------
@@ -152,8 +176,9 @@ async function sendTextMenu(sock, sender, currentMenu) {
   await sock.sendMessage(sender, { text: menuMessage });
 }
 
-function getCartSummary(cart) {
-  if (cart.length === 0) return { text: "Your cart is empty! 🛒\nType *menu* to see our plants.", total: 0, subtotal: 0 };
+// Updated to use dynamic delivery fee
+function getCartSummary(cart, botSettings) {
+  if (cart.length === 0) return { text: "Your cart is empty! 🛒\nType *menu* to see our plants.", total: 0, subtotal: 0, deliveryFee: botSettings.deliveryFee };
   
   let text = "🛒 *Your Shopping Cart*\n\n";
   let subtotal = 0;
@@ -164,7 +189,7 @@ function getCartSummary(cart) {
     text += `${index + 1}. *${item.name}*\n   ${item.qty} x Rs${item.price.toFixed(2)} = Rs${itemTotal.toFixed(2)}\n`;
   });
 
-  const deliveryFee = 50; // Set your flat delivery fee here
+  const deliveryFee = botSettings.deliveryFee; 
   const total = subtotal + deliveryFee;
 
   text += `\n───────────────\n`;
@@ -181,7 +206,8 @@ function getCartSummary(cart) {
 // Next-Level AI Agent Integration (Structured Data)
 // ---------------------------------------------------------
 
-async function askAIAgent(userText, customerName, currentMenu, currentCart) {
+// Updated to inject custom admin prompt
+async function askAIAgent(userText, customerName, currentMenu, currentCart, botSettings) {
   if (!OPENROUTER_API_KEY) {
     return { reply: "AI service එක තවම setup කරලා නැහැ.", action: "NONE" };
   }
@@ -196,8 +222,12 @@ async function askAIAgent(userText, customerName, currentMenu, currentCart) {
     ? currentCart.map(c => `- ${c.qty}x ${c.name} (Rs${c.price * c.qty})`).join("\n")
     : "Cart is empty.";
 
-  const systemPrompt = `You are Magiflora's AI Cashier & Botanist on WhatsApp.
+  // We combine the base technical rules with the admin's custom personality prompt
+  const systemPrompt = `You are ${botSettings.botName} on WhatsApp.
 Customer name: ${customerName}
+
+ADMIN INSTRUCTIONS FOR YOUR PERSONALITY/TONE:
+"${botSettings.systemPrompt}"
 
 AVAILABLE CATALOG:
 ${menuContext}
@@ -210,7 +240,7 @@ You MUST reply with ONLY a raw JSON object. Do not include markdown formatting (
 
 JSON FORMAT REQUIRED:
 {
-  "reply": "Your conversational reply here in Sinhala/Singlish/English. Be friendly and use emojis.",
+  "reply": "Your conversational reply here matching the Admin Instructions.",
   "action": "NONE", 
   "actionDetails": [
     { "id": "id_from_catalog_here", "qty": 2 }
@@ -417,6 +447,9 @@ async function startBot() {
       
       const session = getSession(sender);
       const currentMenu = await getMenuFromApp();
+      
+      // FETCH LATEST BOT SETTINGS FOR THIS INTERACTION
+      const botSettings = await getBotSettings();
 
       // 1. Check if Waiting for Address (Checkout Flow)
       if (session.step === "WAITING_FOR_ADDRESS") {
@@ -426,7 +459,7 @@ async function startBot() {
             return;
         }
 
-        const { total, subtotal, deliveryFee } = getCartSummary(session.cart);
+        const { total, subtotal, deliveryFee } = getCartSummary(session.cart, botSettings);
 
         const plantOrder = {
           userId: "whatsapp_" + customerWaNumber,
@@ -486,7 +519,7 @@ async function startBot() {
       }
 
       if (text === "cart") {
-        const cartSummary = getCartSummary(session.cart);
+        const cartSummary = getCartSummary(session.cart, botSettings);
         await sock.sendMessage(sender, { text: cartSummary.text });
         return;
       }
@@ -503,14 +536,14 @@ async function startBot() {
            return;
         }
         session.step = "WAITING_FOR_ADDRESS";
-        const summary = getCartSummary(session.cart);
+        const summary = getCartSummary(session.cart, botSettings);
         await sock.sendMessage(sender, { text: `${summary.text}\n\n📝 *Almost done!*\nPlease reply with your:\n*Full Name, Phone Number, and Delivery Address*` });
         return;
       }
 
       if (text.includes("hi") || text.includes("hello") || text.includes("හායි")) {
         await sock.sendMessage(sender, {
-          text: `👋 Hello ${customerName}! Welcome to *Magiflora* 🌿\nI am your AI Assistant. You can chat with me naturally to build your cart, or use commands:\n\n*menu* - Show plants\n*cart* - View cart\n*checkout* - Place order\n*status* - Track order\n\n_E.g. Just say "Show me the menu" or "I want to buy 2 red roses"._ 🪴`
+          text: `👋 Hello ${customerName}! Welcome to *${botSettings.botName}* 🌿\nI am your AI Assistant. You can chat with me naturally to build your cart, or use commands:\n\n*menu* - Show plants\n*cart* - View cart\n*checkout* - Place order\n*status* - Track order\n\n_E.g. Just say "Show me the menu" or "I want to buy 2 red roses"._ 🪴`
         });
         return;
       }
@@ -519,7 +552,7 @@ async function startBot() {
       // Display typing indicator to feel more "alive"
       await sock.sendPresenceUpdate('composing', sender);
       
-      const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart);
+      const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, botSettings);
       
       // Process AI Action
       if (aiResult.action === "ADD_TO_CART") {
@@ -551,7 +584,7 @@ async function startBot() {
           }
       } 
       else if (aiResult.action === "VIEW_CART") {
-          const cartSummary = getCartSummary(session.cart);
+          const cartSummary = getCartSummary(session.cart, botSettings);
           await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n${cartSummary.text}` });
       } 
       else if (aiResult.action === "SHOW_MENU") {
