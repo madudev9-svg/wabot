@@ -15,12 +15,12 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const userSessions = {};
 let dbStatusListenerStarted = false;
 
-// Default Bot Settings (In case Firebase is unreachable)
+// Default Bot Settings
 const DEFAULT_SETTINGS = {
-  botName: "Magiflora AI",
+  botName: "Madu", // Sweet teen name by default
   deliveryBaseFee: 425, // First 1KG fee
   deliveryExtraFee: 125, // Per additional 1KG fee
-  systemPrompt: "You are a friendly botanical assistant. Speak in friendly Sinhala/Singlish. Use emojis."
+  systemPrompt: "You are a very sweet, friendly Sri Lankan teenage girl helping customers order plants at Magiflora. Talk in very natural conversational Singlish or Sinhala. Use cute emojis like 🥰, 🌸, ✨, 🥺. Treat the customer like a close friend. Never act like a robot or use highly formal words."
 };
 
 // ---------------------------------------------------------
@@ -97,29 +97,8 @@ async function firebasePatch(path, data) {
   return await res.json();
 }
 
-// ---------------------------------------------------------
-// Formatting & Status Utilities
-// ---------------------------------------------------------
-
 function getMessageText(msg) {
   return msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-}
-
-function getStatusEmoji(status) {
-  const map = { Placed: "📝", Preparing: "🪴", Packing: "📦", "Out for Delivery": "🚚", Delivered: "🎉", Cancelled: "❌" };
-  return map[status] || "📦";
-}
-
-function getStatusSinhala(status) {
-  const map = {
-    Placed: "ඔයාගේ order එක confirm වෙලා තියෙනවා. අපි ඉක්මනින් process කරනවා. 🌿",
-    Preparing: "ඔයාගේ පැල order එක ලෑස්ති කරමින් තියෙනවා. 🪴",
-    Packing: "ඔයාගේ පැල order එක pack කරමින් තියෙනවා. 📦",
-    "Out for Delivery": "ඔයාගේ order එක delivery සඳහා පිටත් කරලා තියෙනවා. 🚚",
-    Delivered: `🌿 *ඔබගේ Magiflora Order එක සාර්ථකව ලබා දී ඇත!* ✅\n\nඔබ අපිට විශ්වාසයෙන් order කළාට ගොඩක් ස්තුතියි. 🪴💚\nපැලය ගැන care tips, watering, sunlight ගැන අවශ්‍ය උනොත් anytime අපිට message කරන්න.\n\n*Thank you for choosing Magiflora!* 🌱`,
-    Cancelled: "ඔයාගේ order එක cancel කරලා තියෙනවා. වැඩි විස්තර සඳහා අපිව contact කරන්න. ❌"
-  };
-  return map[status] || `ඔයාගේ order status එක දැන්: ${status}`;
 }
 
 async function getMenuFromApp() {
@@ -159,37 +138,58 @@ async function getBotSettings() {
 }
 
 // ---------------------------------------------------------
-// Cart & Menu Display Helpers
+// NEW: AI Natural Message Generator
 // ---------------------------------------------------------
+// Generates contextual, natural messages WITHOUT requiring JSON parsing.
+// Perfect for checkout steps, status updates, and notifications.
+async function generateNaturalMessage(instruction, botSettings, customerName = "Yaaluwa") {
+    if (!OPENROUTER_API_KEY) return "Ayyoo, AI service eka wada naane! 🥺 Tikakin try karannako.";
 
-async function sendTextMenu(sock, sender, currentMenu) {
-  if (currentMenu.length === 0) {
-    await sock.sendMessage(sender, { text: "🌿 Magiflora plant catalog එක currently update වෙනවා. කරුණාකර ටිකකින් නැවත බලන්න." });
-    return;
-  }
+    const systemPrompt = `You are ${botSettings.botName}, a sweet, friendly Sri Lankan teenage girl who loves plants and works at Magiflora. 
+    You are chatting on WhatsApp. Talk in very natural conversational Singlish or Sinhala. 
+    Use cute emojis like 🥰, 🌸, ✨, 🥺. 
+    NEVER sound like a robot, an AI language model, or use highly formal templates. Treat the customer like a close friend. 
+    Customer Name: ${customerName}.
+    
+    ADMIN INSTRUCTIONS FOR YOUR PERSONALITY:
+    "${botSettings.systemPrompt}"
+    
+    CRITICAL TASK: ${instruction}
+    
+    Respond DIRECTLY to the customer. Do NOT use JSON. Do NOT wrap in quotes. Do NOT use markdown code blocks. Just output the natural message.`;
 
-  let menuMessage = "🌿 *Magiflora Plant Catalog* 🪴\n\n";
-  currentMenu.forEach((item) => {
-    menuMessage += `${item.displayId}. *${item.name}* - Rs${item.price.toFixed(2)}\n`;
-  });
+    try {
+        const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://magiflora.lk",
+                "X-OpenRouter-Title": "Magiflora WhatsApp Bot"
+            },
+            body: JSON.stringify({
+                model: "google/gemini-2.0-flash-001",
+                messages: [{ role: "system", content: systemPrompt }]
+            })
+        }, 30000);
 
-  menuMessage += `\n🛒 *How to Order:*\nType the numbers and quantities to the AI.\n_Example: "I want 2 of number 1 and 1 of number 3"_\n\n*Quick Commands:*\n👉 *cart* - View Cart\n👉 *checkout* - Place Order\n👉 *status* - Track Order`;
-  await sock.sendMessage(sender, { text: menuMessage });
+        const data = await response.json();
+        if (!response.ok) return "Sorry, mama dan poddak busy! 🥺 Poddak idala message ekak danna.";
+        
+        return data.choices?.[0]?.message?.content?.trim() || "Hmm... mata therune na. 🥺";
+    } catch(error) {
+        return "Ayyoo, mage internet connection eka poddak awul. 🥺 Tikakin kiyannako!";
+    }
 }
 
-// Dynamic weight-based delivery fee calculation
-function getCartSummary(cart, botSettings) {
-  if (cart.length === 0) return { text: "Your cart is empty! 🛒\nType *menu* to see our plants.", total: 0, subtotal: 0, deliveryFee: botSettings.deliveryBaseFee, totalWeightGrams: 0 };
-  
-  let text = "🛒 *Your Shopping Cart*\n\n";
+// Dynamic weight-based delivery calculation
+function calculateCartData(cart, botSettings) {
   let subtotal = 0;
   let totalWeightGrams = 0;
   
-  cart.forEach((item, index) => {
-    const itemTotal = item.price * item.qty;
-    subtotal += itemTotal;
+  cart.forEach((item) => {
+    subtotal += (item.price * item.qty);
     totalWeightGrams += (item.weight * item.qty);
-    text += `${index + 1}. *${item.name}*\n   ${item.qty} x Rs${item.price.toFixed(2)} = Rs${itemTotal.toFixed(2)}\n`;
   });
 
   let deliveryFee = botSettings.deliveryBaseFee;
@@ -200,25 +200,15 @@ function getCartSummary(cart, botSettings) {
   }
 
   const total = subtotal + deliveryFee;
-
-  text += `\n───────────────\n`;
-  text += `Subtotal: Rs${subtotal.toFixed(2)}\n`;
-  text += `Total Weight: ${(totalWeightGrams / 1000).toFixed(2)} kg\n`;
-  text += `Delivery: Rs${deliveryFee.toFixed(2)}\n`;
-  text += `*Total: Rs${total.toFixed(2)}*\n`;
-  text += `───────────────\n\n`;
-
-  return { text, total, subtotal, deliveryFee, totalWeightGrams };
+  return { subtotal, deliveryFee, total, totalWeightGrams };
 }
 
 // ---------------------------------------------------------
-// Next-Level AI Agent Integration (Structured Data)
+// JSON-Based AI Agent (For Intent Parsing & Add to Cart)
 // ---------------------------------------------------------
 
 async function askAIAgent(userText, customerName, currentMenu, currentCart, botSettings) {
-  if (!OPENROUTER_API_KEY) {
-    return { reply: "AI service එක තවම setup කරලා නැහැ.", action: "NONE" };
-  }
+  if (!OPENROUTER_API_KEY) return { reply: "Ayyoo, AI service eka wada naane! 🥺", action: "NONE" };
 
   const menuContext = currentMenu.length
     ? currentMenu.map(m => `Num: ${m.displayId} | ID: ${m.id} | Name: ${m.name} | Price: Rs${m.price}`).join("\n")
@@ -228,11 +218,12 @@ async function askAIAgent(userText, customerName, currentMenu, currentCart, botS
     ? currentCart.map(c => `- ${c.qty}x ${c.name} (Rs${c.price * c.qty})`).join("\n")
     : "Cart is empty.";
 
-  const systemPrompt = `You are ${botSettings.botName} on WhatsApp.
+  const systemPrompt = `You are ${botSettings.botName}, a sweet Sri Lankan teenage girl working at Magiflora.
 Customer name: ${customerName}
 
 ADMIN INSTRUCTIONS FOR YOUR PERSONALITY/TONE:
 "${botSettings.systemPrompt}"
+NEVER SOUND LIKE A BOT. Be very natural, sweet, and conversational in Singlish/Sinhala.
 
 AVAILABLE CATALOG:
 ${menuContext}
@@ -241,11 +232,11 @@ CUSTOMER'S CURRENT CART:
 ${cartContext}
 
 CRITICAL INSTRUCTION:
-You MUST reply with ONLY a raw JSON object. Do not include markdown formatting (like \`\`\`json). Just the JSON string. Your response will be parsed programmatically.
+You MUST reply with ONLY a raw JSON object. Do not include markdown formatting (like \`\`\`json). Just the JSON string. 
 
 JSON FORMAT REQUIRED:
 {
-  "reply": "Your conversational reply here matching the Admin Instructions.",
+  "reply": "Your completely natural, sweet teenage girl response.",
   "action": "NONE", 
   "actionDetails": [
     { "id": "id_from_catalog_here", "qty": 2 }
@@ -253,20 +244,18 @@ JSON FORMAT REQUIRED:
 }
 
 VALID ACTIONS:
-- "ADD_TO_CART": If the user wants to add items to their cart. You MUST include "actionDetails" with the exact catalog 'ID' and the integer 'qty'.
-- "CHECKOUT": If the user wants to finalize their order or says they are done.
-- "VIEW_CART": If the user asks what is in their cart or asks for total.
-- "SHOW_MENU": If the user asks to see plants or prices.
-- "CLEAR_CART": If the user wants to empty their cart or cancel the current cart.
-- "CHECK_STATUS": If the user asks to check their order status, track their order, or asks about past orders (e.g. "mage order eka mokada wune", "order status", "order ekagana balanna").
-- "NONE": For general chit-chat, plant care advice, or unrecognized requests.
+- "ADD_TO_CART": If user wants to add items. You MUST include "actionDetails".
+- "CHECKOUT": If user wants to finalize order.
+- "VIEW_CART": If user asks what is in their cart or total.
+- "SHOW_MENU": If user asks to see plants or prices.
+- "CLEAR_CART": If user wants to cancel their cart.
+- "CHECK_STATUS": If user asks for order status, tracking, or history.
+- "NONE": General chat.
 
 RULES:
-- If a user says "Add 2 roses", map "roses" to the correct catalog ID, set action to "ADD_TO_CART", and qty to 2.
-- If a user says "add number 1", map "number 1" to the ID of the item with Num: 1.
-- You can add multiple items in a single ADD_TO_CART action by putting multiple objects in the actionDetails array.
-- ALWAYS calculate and confirm in your "reply" what you did.
-- Never fake prices. Use the catalog exactly.`;
+- Map item names or numbers to correct catalog ID.
+- ALWAYS be sweet in your "reply".
+- Never fake prices.`;
 
   try {
     const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
@@ -274,8 +263,7 @@ RULES:
       headers: {
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://magiflora.lk",
-        "X-OpenRouter-Title": "Magiflora WhatsApp Bot"
+        "HTTP-Referer": "https://magiflora.lk"
       },
       body: JSON.stringify({
         model: "google/gemini-2.0-flash-001",
@@ -287,25 +275,19 @@ RULES:
     }, 30000);
 
     const data = await response.json();
-
-    if (!response.ok) {
-      console.error("OpenRouter Error:", data);
-      return { reply: "Sorry, AI reply එක generate කරන්න බැරි වුණා. ටිකකින් නැවත try කරන්න.", action: "NONE" };
-    }
+    if (!response.ok) return { reply: "Ayyoo, podi aulak una! 🥺 Tikakin try karannako.", action: "NONE" };
 
     let content = data.choices?.[0]?.message?.content || "";
     content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
     
     const parsedData = JSON.parse(content);
     return {
-      reply: parsedData.reply || "I didn't quite get that.",
+      reply: parsedData.reply || "Hmm... mata therune na. 🥺",
       action: parsedData.action || "NONE",
       actionDetails: parsedData.actionDetails || []
     };
-    
   } catch (error) {
-    console.error("AI request/parse failed:", error.message);
-    return { reply: "Sorry, I couldn't process your request safely. You can type *menu* to view plants.", action: "NONE" };
+    return { reply: "Mage internet poddak awul wela! 🥺 Oya type karapu de mata awe na.", action: "NONE" };
   }
 }
 
@@ -327,38 +309,21 @@ async function getCustomerOrders(customerWaNumber, senderJid) {
       })
       .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
   } catch (error) {
-    console.error("Get customer orders error:", error.message);
     return [];
   }
-}
-
-async function sendCustomerStatus(sock, sender, customerWaNumber) {
-  const orders = await getCustomerOrders(customerWaNumber, sender);
-
-  if (orders.length === 0) {
-    await sock.sendMessage(sender, { text: `📦 ඔයාගේ WhatsApp number එකට order එකක් හමු වුණේ නැහැ.\nOrder කරන්න *menu* කියලා type කරන්න.` });
-    return;
-  }
-
-  const latest = orders[0];
-  const status = latest.status || "Placed";
-  const items = latest.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "No items";
-
-  await sock.sendMessage(sender, {
-    text: `${getStatusEmoji(status)} *Magiflora Order Status*\n\nOrder ID: ${makeOrderId(latest.id)}\nItems: ${items}\nTotal: Rs${parseFloat(latest.total).toFixed(2)}\nStatus: *${status}*\n\n${getStatusSinhala(status)}`
-  });
 }
 
 // Listens for both Status Changes and Detail Edits
 function listenOrderStatusChanges(sock) {
   if (dbStatusListenerStarted) return;
   dbStatusListenerStarted = true;
-  console.log("📡 Order status & edit listener started...");
+  console.log("📡 Natural Order status & edit listener started...");
 
   setInterval(async () => {
     try {
       const orders = await firebaseGet("orders");
       if (!orders) return;
+      const botSettings = await getBotSettings(); // Fetch current persona
 
       for (const [id, order] of Object.entries(orders)) {
         const currentStatus = order.status || "Placed";
@@ -372,12 +337,12 @@ function listenOrderStatusChanges(sock) {
 
         if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
           const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
-          messageToSend = `${getStatusEmoji(currentStatus)} *Magiflora Order Update* 🌿\n\nOrder ID: ${makeOrderId(id)}\nItems: ${items}\n\nPrevious Status: ${lastNotified}\nNew Status: *${currentStatus}*\n\n${getStatusSinhala(currentStatus)}`;
+          messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally.`, botSettings, order.customerName);
           updatePayload.lastNotifiedStatus = currentStatus;
           updatePayload.lastNotifiedAt = new Date().toISOString();
         } 
         else if (currentEditTimestamp > lastNotifiedEdit) {
-          messageToSend = `📝 *Magiflora Order Details Updated* 🌿\n\nOrder ID: ${makeOrderId(id)}\n\nඅපි ඔබගේ ඕඩර් එකේ විස්තර යාවත්කාලීන කර ඇත. (We have updated your order details).\n\n*Name:* ${order.customerName}\n*Address:* ${order.address}\n*Phone 1:* ${order.phone1}\n*Phone 2:* ${order.phone2 || 'N/A'}\n\nගැටළුවක් ඇත්නම් කරුණාකර අපව දැනුවත් කරන්න.`;
+          messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry.`, botSettings, order.customerName);
           updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
         }
 
@@ -386,7 +351,7 @@ function listenOrderStatusChanges(sock) {
           if (jid) {
             await sock.sendMessage(jid, { text: messageToSend });
             await firebasePatch(`orders/${id}`, updatePayload);
-            console.log(`✅ Auto update/status message sent to ${jid}`);
+            console.log(`✅ Natural status message sent to ${jid}`);
           }
         }
       }
@@ -429,17 +394,14 @@ async function startBot() {
     }
 
     if (connection === "open") {
-      console.log("✅ Magiflora Advanced AI WhatsApp Bot is ONLINE!");
+      console.log("✅ Magiflora Natural AI Bot is ONLINE!");
       listenOrderStatusChanges(sock);
     }
 
     if (connection === "close") {
       const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log("Connection closed. Reason:", reason);
       if (reason !== DisconnectReason.loggedOut) {
         startBot();
-      } else {
-        console.log("❌ Logged out. Delete session_data and scan QR again.");
       }
     }
   });
@@ -453,7 +415,7 @@ async function startBot() {
 
       const sender = msg.key.remoteJid;
       const customerWaNumber = cleanPhoneNumber(sender.split("@")[0]);
-      const customerName = msg.pushName || "Customer";
+      const customerName = msg.pushName || "Yaaluwa";
       const rawText = getMessageText(msg).trim();
       const text = rawText.toLowerCase();
 
@@ -465,43 +427,49 @@ async function startBot() {
       const currentMenu = await getMenuFromApp();
       const botSettings = await getBotSettings();
 
-      // Checkout chya veli kadhihi cancel command tadasa
+      await sock.sendPresenceUpdate('composing', sender); // Makes it feel human
+
+      // Cancel check
       if (text === "cancel" && session.step !== "IDLE") {
           session.step = "IDLE";
           session.checkoutData = {};
-          await sock.sendMessage(sender, { text: "❌ Checkout එක cancel කළා.\n\n👉 ආපසු මෙනුව බැලීමට *menu* ලෙස type කරන්න." });
+          const reply = await generateNaturalMessage("The customer just cancelled the checkout process. Say 'no problem at all' sweetly and tell them they can look at the menu again anytime.", botSettings, customerName);
+          await sock.sendMessage(sender, { text: reply });
           return;
       }
 
       // ==========================================
-      // Step-by-Step Checkout Flow
+      // Step-by-Step Checkout Flow (Now AI Generated)
       // ==========================================
       
       if (session.step === "WAITING_FOR_NAME") {
           session.checkoutData.name = rawText;
           session.step = "WAITING_FOR_ADDRESS";
-          await sock.sendMessage(sender, { text: "📍 දැන් ඔබගේ *සම්පූර්ණ ලිපිනය* (Delivery Address) ඇතුලත් කරන්න:" });
+          const reply = await generateNaturalMessage(`The customer just gave their name: ${rawText}. Say thank you and sweetly ask for their full delivery address so you can send the plants.`, botSettings, rawText);
+          await sock.sendMessage(sender, { text: reply });
           return;
       }
 
       if (session.step === "WAITING_FOR_ADDRESS") {
           session.checkoutData.address = rawText;
           session.step = "WAITING_FOR_PHONE1";
-          await sock.sendMessage(sender, { text: "📞 කරුණාකර ඔබගේ *ප්‍රධාන දුරකථන අංකය* (Phone Number 1) ඇතුලත් කරන්න:" });
+          const reply = await generateNaturalMessage(`The customer gave their address: ${rawText}. Thank them and ask for their primary phone number to contact them during delivery.`, botSettings, session.checkoutData.name);
+          await sock.sendMessage(sender, { text: reply });
           return;
       }
 
       if (session.step === "WAITING_FOR_PHONE1") {
           session.checkoutData.phone1 = rawText;
           session.step = "WAITING_FOR_PHONE2";
-          await sock.sendMessage(sender, { text: "📱 කරුණාකර ඔබගේ *විකල්ප දුරකථන අංකයක්* (Phone Number 2 - අත්‍යවශ්‍යයි) ඇතුලත් කරන්න:" });
+          const reply = await generateNaturalMessage(`The customer gave their phone number: ${rawText}. Say 'noted!' and sweetly ask if they have an alternate phone number just in case.`, botSettings, session.checkoutData.name);
+          await sock.sendMessage(sender, { text: reply });
           return;
       }
 
       if (session.step === "WAITING_FOR_PHONE2") {
           session.checkoutData.phone2 = rawText;
           
-          const { total, subtotal, deliveryFee, totalWeightGrams } = getCartSummary(session.cart, botSettings);
+          const { total, subtotal, deliveryFee, totalWeightGrams } = calculateCartData(session.cart, botSettings);
 
           const plantOrder = {
             userId: "whatsapp_" + customerWaNumber,
@@ -540,74 +508,46 @@ async function startBot() {
             const saved = await firebasePost("orders", plantOrder);
             const orderId = saved?.name || "new";
 
-            await sock.sendMessage(sender, {
-              text: `✅ *Order Placed Successfully!* 🌿\n\nThank you ${session.checkoutData.name}!\nඅපි ඔබගේ ඕඩර් එක සාර්ථකව ලබා ගත්තා.\n\nOrder ID: ${orderId !== "new" ? makeOrderId(orderId) : "Pending"}\nTotal Weight: ${(totalWeightGrams / 1000).toFixed(2)}kg\nTotal to Pay: *Rs${total.toFixed(2)}*\nPayment: Cash on Delivery\nStatus: *Placed*\n\n📦 Type *status* anytime to track your plants. 🪴`
-            });
+            const successPrompt = `The customer ${session.checkoutData.name} has successfully placed an order! Order ID is ${makeOrderId(orderId)}. The total weight is ${(totalWeightGrams / 1000).toFixed(2)}kg and the total bill (with delivery) is Rs${total.toFixed(2)}. They will pay by Cash on Delivery. Thank them warmly and beautifully for ordering with Magiflora and tell them you are processing it right away!`;
+            const reply = await generateNaturalMessage(successPrompt, botSettings, session.checkoutData.name);
+            await sock.sendMessage(sender, { text: reply });
             
             session.cart = [];
             session.checkoutData = {};
             session.step = "IDLE";
           } catch (error) {
-            console.log("Firebase Order Save Error:", error.message);
-            await sock.sendMessage(sender, { text: "❌ Sorry, order එක save කරන්න බැරි වුණා. කරුණාකර නැවත try කරන්න." });
+            const errReply = await generateNaturalMessage("Tell the customer there was a tiny system error saving the order and ask them to try again in a few minutes nicely.", botSettings, session.checkoutData.name);
+            await sock.sendMessage(sender, { text: errReply });
           }
           return;
       }
 
       // ==========================================
-      // Exact Manual Commands
+      // Manual Commands via AI
       // ==========================================
-      
-      if (text === "status") {
-        await sendCustomerStatus(sock, sender, customerWaNumber);
-        return;
-      }
 
       if (text === "menu") {
-        await sendTextMenu(sock, sender, currentMenu);
-        return;
+          if (currentMenu.length === 0) {
+              const reply = await generateNaturalMessage("Tell the customer our plant catalog is empty/updating right now and ask them to check later sweetly.", botSettings, customerName);
+              await sock.sendMessage(sender, { text: reply });
+              return;
+          }
+          
+          let menuStr = currentMenu.map(i => `${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
+          const reply = await generateNaturalMessage(`Show this plant menu to the customer beautifully:\n\n${menuStr}\n\nTell them to just reply with what they want to add!`, botSettings, customerName);
+          await sock.sendMessage(sender, { text: reply });
+          return;
       }
 
-      if (text === "cart") {
-        const cartSummary = getCartSummary(session.cart, botSettings);
-        if (session.cart.length === 0) {
-            await sock.sendMessage(sender, { text: cartSummary.text });
-        } else {
-            await sock.sendMessage(sender, { text: cartSummary.text + "\n👉 *checkout* ලෙස type කර ඔබගේ order එක සම්පූර්ණ කරන්න." });
-        }
-        return;
-      }
-
-      if (text === "clear") {
-        session.cart = [];
-        await sock.sendMessage(sender, { text: "🗑️ Your cart has been emptied.\n👉 අලුතින් පටන් ගැනීමට *menu* ලෙස type කරන්න." });
-        return;
-      }
-
-      if (text === "checkout") {
-        if (session.cart.length === 0) {
-           await sock.sendMessage(sender, { text: "❌ Your cart is empty! Add some plants first.\n👉 මෙනුව බැලීමට *menu* ලෙස type කරන්න." });
-           return;
-        }
-        session.step = "WAITING_FOR_NAME";
-        session.checkoutData = {};
-        const summary = getCartSummary(session.cart, botSettings);
-        await sock.sendMessage(sender, { text: `${summary.text}\n📝 *Checkout Process*\n\nඔබගේ order එක සම්පූර්ණ කිරීමට කරුණාකර ඔබගේ *සම්පූර්ණ නම* (Full Name) ඇතුලත් කරන්න:\n\n_(ඕනෑම වෙලාවක cancel කිරීමට *cancel* ලෙස type කරන්න)_` });
-        return;
-      }
-
-      if (text.includes("hi") || text.includes("hello") || text.includes("හායි")) {
-        await sock.sendMessage(sender, {
-          text: `👋 Hello ${customerName}! Welcome to *${botSettings.botName}* 🌿\nI am your AI Assistant.\n\nඔබට අවශ්‍ය සේවාව සඳහා පහත වචන වලින් එකක් Type කරන්න, නැතිනම් මට අවශ්‍ය පැලයේ නම Type කරන්න (උදා: රතු රෝස පැල 2ක් ඕන). 🪴\n\n👉 *menu* - මෙනුව බැලීමට\n👉 *cart* - කරත්තය බැලීමට\n👉 *status* - Order එක පරීක්ෂා කිරීමට`
-        });
-        return;
+      if (text === "cart" || text === "checkout" || text === "clear" || text.includes("hi") || text.includes("hello") || text.includes("හායි")) {
+         // Let the askAIAgent handle these through intent matching!
+         // This ensures EVERYTHING flows naturally.
       }
 
       // ==========================================
       // AI Agent Parsing (Natural Language)
       // ==========================================
       
-      await sock.sendPresenceUpdate('composing', sender);
       const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, botSettings);
       
       if (aiResult.action === "ADD_TO_CART") {
@@ -619,61 +559,81 @@ async function startBot() {
                       const existingItem = session.cart.find(c => c.id === menuItem.id);
                       if (existingItem) existingItem.qty += actionItem.qty;
                       else session.cart.push({ ...menuItem, qty: actionItem.qty });
-                      itemsAdded.push(menuItem); // Photo yawanata list ekata damuwa
+                      itemsAdded.push(menuItem); // Save to send photo
                   }
               });
           }
           if(itemsAdded.length > 0) {
-             // Photo send kireema
+             // Send Photos
              for (let i = 0; i < itemsAdded.length; i++) {
                  let item = itemsAdded[i];
                  if (item.imageUrl) {
                      try {
                          await sock.sendMessage(sender, { 
                              image: { url: item.imageUrl }, 
-                             caption: `🪴 *${item.name}*\nRs${item.price.toFixed(2)}` 
+                             caption: `🪴 ${item.name}` 
                          });
-                     } catch (e) {
-                         console.error("Image yaveeme doshayak:", e);
-                     }
+                     } catch (e) {}
                  }
              }
-
-             await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n👉 Order එක ප්ලේස් කිරීමට *checkout* ලෙස type කරන්න.\n👉 තවත් පැල බැලීමට *menu* ලෙස type කරන්න.` });
+             await sock.sendMessage(sender, { text: aiResult.reply });
           } else {
-             await sock.sendMessage(sender, { text: "මට ඔයා කියපු පැලේ හරියටම අඳුරගන්න බැරි වුණා.\n👉 කරුණාකර *menu* ලෙස type කර මෙනුව බලන්න." });
+             const reply = await generateNaturalMessage("The customer asked for a plant not in the menu. Tell them sweetly you couldn't find it and they should look at the menu.", botSettings, customerName);
+             await sock.sendMessage(sender, { text: reply });
           }
       } 
       else if (aiResult.action === "CHECKOUT") {
           if (session.cart.length === 0) {
-            await sock.sendMessage(sender, { text: "Your cart is empty! You need to add items before checking out.\n👉 මෙනුව බැලීමට *menu* ලෙස type කරන්න." });
+            const reply = await generateNaturalMessage("The customer wants to checkout, but their cart is empty. Remind them sweetly to add plants first.", botSettings, customerName);
+            await sock.sendMessage(sender, { text: reply });
           } else {
             session.step = "WAITING_FOR_NAME";
             session.checkoutData = {};
-            await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n📝 *Checkout Process*\n\nඔබගේ order එක සම්පූර්ණ කිරීමට කරුණාකර ඔබගේ *සම්පූර්ණ නම* (Full Name) ඇතුලත් කරන්න:\n\n_(ඕනෑම වෙලාවක cancel කිරීමට *cancel* ලෙස type කරන්න)_` });
+            const reply = await generateNaturalMessage("The customer is ready to checkout! Ask them for their full name to start processing the order. Be sweet.", botSettings, customerName);
+            await sock.sendMessage(sender, { text: reply });
           }
       } 
       else if (aiResult.action === "VIEW_CART") {
-          const cartSummary = getCartSummary(session.cart, botSettings);
-          await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n${cartSummary.text}\n👉 Order එක ප්ලේස් කිරීමට *checkout* ලෙස type කරන්න.` });
+          if (session.cart.length === 0) {
+             const reply = await generateNaturalMessage("Customer asked to see cart, but it is empty. Tell them nicely.", botSettings, customerName);
+             await sock.sendMessage(sender, { text: reply });
+          } else {
+             const { total, subtotal, deliveryFee, totalWeightGrams } = calculateCartData(session.cart, botSettings);
+             const cartStr = session.cart.map(c => `${c.qty}x ${c.name} (Rs${c.price * c.qty})`).join(", ");
+             const prompt = `Customer wants to see their cart. Items: ${cartStr}. Subtotal: Rs${subtotal}. Delivery: Rs${deliveryFee}. Total to pay: Rs${total}. Weight: ${totalWeightGrams/1000}kg. Present this information beautifully and sweetly. Tell them they can say 'checkout' when ready.`;
+             const reply = await generateNaturalMessage(prompt, botSettings, customerName);
+             await sock.sendMessage(sender, { text: reply });
+          }
       } 
       else if (aiResult.action === "SHOW_MENU") {
           await sock.sendMessage(sender, { text: aiResult.reply });
-          await sendTextMenu(sock, sender, currentMenu);
+          
+          if (currentMenu.length > 0) {
+              let menuStr = currentMenu.map(i => `${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
+              const reply = await generateNaturalMessage(`Show this menu beautifully:\n\n${menuStr}`, botSettings, customerName);
+              await sock.sendMessage(sender, { text: reply });
+          }
       }
       else if (aiResult.action === "CLEAR_CART") {
           session.cart = [];
-          await sock.sendMessage(sender, { text: `${aiResult.reply}\n👉 අලුතින් පටන් ගැනීමට *menu* ලෙස type කරන්න.` });
+          const reply = await generateNaturalMessage("Customer cleared their cart. Say 'no problem' and tell them they can start over anytime.", botSettings, customerName);
+          await sock.sendMessage(sender, { text: reply });
       }
       else if (aiResult.action === "CHECK_STATUS") {
-          // Send conversational reply first (if any)
-          if (aiResult.reply && aiResult.reply !== "I didn't quite get that.") {
-              await sock.sendMessage(sender, { text: aiResult.reply });
+          const orders = await getCustomerOrders(customerWaNumber, sender);
+          if (orders.length === 0) {
+              const reply = await generateNaturalMessage("Customer asked for their order status, but they have no orders placed. Tell them this very sweetly.", botSettings, customerName);
+              await sock.sendMessage(sender, { text: reply });
+          } else {
+              const latest = orders[0];
+              const items = latest.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "No items";
+              const prompt = `Customer asked for order status. Tell them sweetly: Order ID is ${makeOrderId(latest.id)}, items are [${items}], Total is Rs${latest.total}, and the current status is '${latest.status || 'Placed'}'. Add a nice reassuring comment.`;
+              const reply = await generateNaturalMessage(prompt, botSettings, customerName);
+              await sock.sendMessage(sender, { text: reply });
           }
-          // Trigger normal status check
-          await sendCustomerStatus(sock, sender, customerWaNumber);
       }
       else {
+          // General conversational reply (e.g., Hello, Thanks, Plant questions)
           await sock.sendMessage(sender, { text: aiResult.reply });
       }
 
