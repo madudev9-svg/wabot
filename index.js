@@ -2,7 +2,9 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  generateWAMessageFromContent,
+  proto
 } = require("@whiskeysockets/baileys");
 
 const qrcode = require("qrcode-terminal");
@@ -18,12 +20,13 @@ let dbStatusListenerStarted = false;
 // Default Bot Settings (In case Firebase is unreachable)
 const DEFAULT_SETTINGS = {
   botName: "Magiflora AI",
-  deliveryFee: 50,
+  deliveryBaseFee: 425, // First 1KG fee
+  deliveryExtraFee: 125, // Per additional 1KG fee
   systemPrompt: "You are a friendly botanical assistant. Speak in friendly Sinhala/Singlish. Use emojis."
 };
 
 // ---------------------------------------------------------
-// Helper Functions
+// Helper Functions & Button Setup
 // ---------------------------------------------------------
 
 function cleanPhoneNumber(phone) {
@@ -36,7 +39,6 @@ function makeOrderId(firebaseId) {
   return `#${firebaseId.substring(1, 7).toUpperCase()}`;
 }
 
-// Get or initialize a user's session
 function getSession(sender) {
   if (!userSessions[sender]) {
     userSessions[sender] = { step: "IDLE", cart: [], checkoutData: {} };
@@ -56,6 +58,32 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
     clearTimeout(timer);
     throw error;
   }
+}
+
+// --- NEW FUNCTION: Send Interactive Native Flow Buttons ---
+async function sendButtons(sock, jid, text, buttonsArray) {
+  const buttons = buttonsArray.map(btn => ({
+    name: "quick_reply",
+    buttonParamsJson: JSON.stringify({ display_text: btn.text, id: btn.id })
+  }));
+
+  const msg = generateWAMessageFromContent(jid, {
+    viewOnceMessage: {
+      message: {
+        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+        interactiveMessage: proto.Message.InteractiveMessage.create({
+          body: proto.Message.InteractiveMessage.Body.create({ text: text }),
+          footer: proto.Message.InteractiveMessage.Footer.create({ text: "Magiflora Botanist Bot 🌿" }),
+          header: proto.Message.InteractiveMessage.Header.create({ title: "", hasMediaAttachment: false }),
+          nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+            buttons: buttons
+          })
+        })
+      }
+    }
+  }, {});
+
+  await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
 }
 
 // ---------------------------------------------------------
@@ -101,7 +129,23 @@ async function firebasePatch(path, data) {
 // ---------------------------------------------------------
 
 function getMessageText(msg) {
-  return msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+  // Check for normal text
+  if (msg.message?.conversation) return msg.message.conversation;
+  if (msg.message?.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
+  
+  // Check for Interactive Button Reply
+  if (msg.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
+      try {
+          const params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
+          return params.id; // returns the Button ID (e.g. "menu", "checkout")
+      } catch (e) { return ""; }
+  }
+  
+  // Fallbacks for older button types
+  if (msg.message?.templateButtonReplyMessage?.id) return msg.message.templateButtonReplyMessage.id;
+  if (msg.message?.buttonsResponseMessage?.selectedButtonId) return msg.message.buttonsResponseMessage.selectedButtonId;
+  
+  return "";
 }
 
 function getStatusEmoji(status) {
@@ -131,6 +175,7 @@ async function getMenuFromApp() {
       id: key,
       name: data[key].name,
       price: parseFloat(data[key].price),
+      weight: parseInt(data[key].weight) || 1000, // Default to 1000g
       imageUrl: data[key].imageUrl || ""
     }));
   } catch (error) {
@@ -145,7 +190,8 @@ async function getBotSettings() {
     if (settings) {
       return {
         botName: settings.botName || DEFAULT_SETTINGS.botName,
-        deliveryFee: settings.deliveryFee !== undefined ? parseFloat(settings.deliveryFee) : DEFAULT_SETTINGS.deliveryFee,
+        deliveryBaseFee: settings.deliveryBaseFee !== undefined ? parseFloat(settings.deliveryBaseFee) : DEFAULT_SETTINGS.deliveryBaseFee,
+        deliveryExtraFee: settings.deliveryExtraFee !== undefined ? parseFloat(settings.deliveryExtraFee) : DEFAULT_SETTINGS.deliveryExtraFee,
         systemPrompt: settings.systemPrompt || DEFAULT_SETTINGS.systemPrompt
       };
     }
@@ -170,36 +216,50 @@ async function sendTextMenu(sock, sender, currentMenu) {
     menuMessage += `${item.displayId}. *${item.name}* - Rs${item.price.toFixed(2)}\n`;
   });
 
-  menuMessage += `\n🛒 *How to Order:*\nType the numbers and quantities to the AI.\n_Example: "I want 2 of number 1 and 1 of number 3"_\n\nOr use commands:\n*cart* - View cart\n*checkout* - Place order\n*status* - Track order`;
-  await sock.sendMessage(sender, { text: menuMessage });
+  menuMessage += `\n🛒 *How to Order:*\nType the numbers and quantities to the AI.\n_Example: "I want 2 of number 1 and 1 of number 3"_`;
+  
+  // Use Buttons for easier navigation
+  await sendButtons(sock, sender, menuMessage, [
+    { text: "🛒 View Cart", id: "cart" },
+    { text: "✅ Checkout", id: "checkout" }
+  ]);
 }
 
 function getCartSummary(cart, botSettings) {
-  if (cart.length === 0) return { text: "Your cart is empty! 🛒\nType *menu* to see our plants.", total: 0, subtotal: 0, deliveryFee: botSettings.deliveryFee };
+  if (cart.length === 0) return { text: "Your cart is empty! 🛒", total: 0, subtotal: 0, deliveryFee: botSettings.deliveryBaseFee, totalWeightGrams: 0 };
   
   let text = "🛒 *Your Shopping Cart*\n\n";
   let subtotal = 0;
+  let totalWeightGrams = 0;
   
   cart.forEach((item, index) => {
     const itemTotal = item.price * item.qty;
     subtotal += itemTotal;
+    totalWeightGrams += (item.weight * item.qty);
     text += `${index + 1}. *${item.name}*\n   ${item.qty} x Rs${item.price.toFixed(2)} = Rs${itemTotal.toFixed(2)}\n`;
   });
 
-  const deliveryFee = botSettings.deliveryFee; 
+  let deliveryFee = botSettings.deliveryBaseFee;
+  if (totalWeightGrams > 1000) {
+      const extraWeight = totalWeightGrams - 1000;
+      const extraKGs = Math.ceil(extraWeight / 1000); 
+      deliveryFee += (extraKGs * botSettings.deliveryExtraFee);
+  }
+
   const total = subtotal + deliveryFee;
 
   text += `\n───────────────\n`;
   text += `Subtotal: Rs${subtotal.toFixed(2)}\n`;
+  text += `Total Weight: ${(totalWeightGrams / 1000).toFixed(2)} kg\n`;
   text += `Delivery: Rs${deliveryFee.toFixed(2)}\n`;
   text += `*Total: Rs${total.toFixed(2)}*\n`;
-  text += `───────────────\n\n`;
+  text += `───────────────\n`;
 
-  return { text, total, subtotal, deliveryFee };
+  return { text, total, subtotal, deliveryFee, totalWeightGrams };
 }
 
 // ---------------------------------------------------------
-// Next-Level AI Agent Integration (Structured Data)
+// Next-Level AI Agent Integration
 // ---------------------------------------------------------
 
 async function askAIAgent(userText, customerName, currentMenu, currentCart, botSettings) {
@@ -250,7 +310,6 @@ VALID ACTIONS:
 RULES:
 - If a user says "Add 2 roses", map "roses" to the correct catalog ID, set action to "ADD_TO_CART", and qty to 2.
 - If a user says "add number 1", map "number 1" to the ID of the item with Num: 1.
-- You can add multiple items in a single ADD_TO_CART action by putting multiple objects in the actionDetails array.
 - ALWAYS calculate and confirm in your "reply" what you did.
 - Never fake prices. Use the catalog exactly.`;
 
@@ -276,7 +335,7 @@ RULES:
 
     if (!response.ok) {
       console.error("OpenRouter Error:", data);
-      return { reply: "Sorry, AI reply එක generate කරන්න බැරි වුණා. ටිකකින් නැවත try කරන්න.", action: "NONE" };
+      return { reply: "Sorry, AI reply එක generate කරන්න බැරි වුණා.", action: "NONE" };
     }
 
     let content = data.choices?.[0]?.message?.content || "";
@@ -322,7 +381,9 @@ async function sendCustomerStatus(sock, sender, customerWaNumber) {
   const orders = await getCustomerOrders(customerWaNumber, sender);
 
   if (orders.length === 0) {
-    await sock.sendMessage(sender, { text: `📦 ඔයාගේ WhatsApp number එකට order එකක් හමු වුණේ නැහැ.\nOrder කරන්න *menu* කියලා type කරන්න.` });
+    await sendButtons(sock, sender, `📦 ඔයාගේ WhatsApp number එකට order එකක් හමු වුණේ නැහැ.`, [
+      { text: "🌿 View Menu", id: "menu" }
+    ]);
     return;
   }
 
@@ -335,7 +396,6 @@ async function sendCustomerStatus(sock, sender, customerWaNumber) {
   });
 }
 
-// Listens for both Status Changes and Detail Edits
 function listenOrderStatusChanges(sock) {
   if (dbStatusListenerStarted) return;
   dbStatusListenerStarted = true;
@@ -356,20 +416,17 @@ function listenOrderStatusChanges(sock) {
         let messageToSend = null;
         let updatePayload = {};
 
-        // 1. Check for Status changes
         if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
           const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
           messageToSend = `${getStatusEmoji(currentStatus)} *Magiflora Order Update* 🌿\n\nOrder ID: ${makeOrderId(id)}\nItems: ${items}\n\nPrevious Status: ${lastNotified}\nNew Status: *${currentStatus}*\n\n${getStatusSinhala(currentStatus)}`;
           updatePayload.lastNotifiedStatus = currentStatus;
           updatePayload.lastNotifiedAt = new Date().toISOString();
         } 
-        // 2. Check for Detail Edit changes from Admin Panel
         else if (currentEditTimestamp > lastNotifiedEdit) {
           messageToSend = `📝 *Magiflora Order Details Updated* 🌿\n\nOrder ID: ${makeOrderId(id)}\n\nඅපි ඔබගේ ඕඩර් එකේ විස්තර යාවත්කාලීන කර ඇත. (We have updated your order details).\n\n*Name:* ${order.customerName}\n*Address:* ${order.address}\n*Phone 1:* ${order.phone1}\n*Phone 2:* ${order.phone2 || 'N/A'}\n\nගැටළුවක් ඇත්නම් කරුණාකර අපව දැනුවත් කරන්න.`;
           updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
         }
 
-        // Send message if needed and patch database
         if (messageToSend) {
           const jid = order.notifyJid || order.customerJid;
           if (jid) {
@@ -382,7 +439,7 @@ function listenOrderStatusChanges(sock) {
     } catch (error) {
       console.log("Status listener error:", error.message);
     }
-  }, 20000); // Check every 20 seconds
+  }, 20000); 
 }
 
 // ---------------------------------------------------------
@@ -443,6 +500,8 @@ async function startBot() {
       const sender = msg.key.remoteJid;
       const customerWaNumber = cleanPhoneNumber(sender.split("@")[0]);
       const customerName = msg.pushName || "Customer";
+      
+      // Use updated getMessageText that extracts Button ID responses
       const rawText = getMessageText(msg).trim();
       const text = rawText.toLowerCase();
 
@@ -458,7 +517,9 @@ async function startBot() {
       if (text === "cancel" && session.step !== "IDLE") {
           session.step = "IDLE";
           session.checkoutData = {};
-          await sock.sendMessage(sender, { text: "❌ Checkout එක cancel කළා. ආපසු menu එක බලන්න *menu* type කරන්න." });
+          await sendButtons(sock, sender, "❌ Checkout එක cancel කළා. පහතින් අවශ්‍ය දේ තෝරන්න:", [
+             { text: "🌿 View Menu", id: "menu" }
+          ]);
           return;
       }
 
@@ -490,16 +551,16 @@ async function startBot() {
       if (session.step === "WAITING_FOR_PHONE2") {
           session.checkoutData.phone2 = rawText;
           
-          const { total, subtotal, deliveryFee } = getCartSummary(session.cart, botSettings);
+          const { total, subtotal, deliveryFee, totalWeightGrams } = getCartSummary(session.cart, botSettings);
 
           const plantOrder = {
             userId: "whatsapp_" + customerWaNumber,
-            userEmail: session.checkoutData.name, // Using name as identifier fallback
+            userEmail: session.checkoutData.name, 
             customerName: session.checkoutData.name,
             whatsappName: customerName,
             customerJid: sender,
             notifyJid: sender,
-            phone: session.checkoutData.phone1, // Primary phone
+            phone: session.checkoutData.phone1, 
             phone1: session.checkoutData.phone1,
             phone2: session.checkoutData.phone2,
             address: session.checkoutData.address,
@@ -510,8 +571,10 @@ async function startBot() {
               name: item.name,
               price: item.price,
               img: item.imageUrl || "",
+              weight: item.weight || 1000,
               quantity: item.qty
             })),
+            totalWeightGrams: totalWeightGrams,
             subtotal: subtotal.toFixed(2),
             deliveryFee: deliveryFee.toFixed(2),
             total: total.toFixed(2),
@@ -520,18 +583,18 @@ async function startBot() {
             source: "WhatsApp Bot",
             timestamp: new Date().toISOString(),
             lastNotifiedStatus: "Placed",
-            lastEditTimestamp: 0 // Initialize edit tracker
+            lastEditTimestamp: 0
           };
 
           try {
             const saved = await firebasePost("orders", plantOrder);
             const orderId = saved?.name || "new";
 
-            await sock.sendMessage(sender, {
-              text: `✅ *Order Placed Successfully!* 🌿\n\nThank you ${session.checkoutData.name}!\nඅපි ඔබගේ ඕඩර් එක සාර්ථකව ලබා ගත්තා.\n\nOrder ID: ${orderId !== "new" ? makeOrderId(orderId) : "Pending"}\nTotal to Pay: *Rs${total.toFixed(2)}*\nPayment: Cash on Delivery\nStatus: *Placed*\n\n📦 Type *status* anytime to track your plants. 🪴`
-            });
+            await sendButtons(sock, sender, `✅ *Order Placed Successfully!* 🌿\n\nThank you ${session.checkoutData.name}!\nඅපි ඔබගේ ඕඩර් එක සාර්ථකව ලබා ගත්තා.\n\nOrder ID: ${orderId !== "new" ? makeOrderId(orderId) : "Pending"}\nTotal Weight: ${(totalWeightGrams / 1000).toFixed(2)}kg\nTotal to Pay: *Rs${total.toFixed(2)}*\nPayment: Cash on Delivery\nStatus: *Placed*\n\nපහතින් Status එක Check කරගන්න පුළුවන්. 🪴`, [
+               { text: "📦 Track Order", id: "status" }
+            ]);
             
-            // Clear cart after successful order
+            // Clear cart
             session.cart = [];
             session.checkoutData = {};
             session.step = "IDLE";
@@ -543,7 +606,7 @@ async function startBot() {
       }
 
       // ==========================================
-      // Exact Manual Commands (Fast Path)
+      // Exact Manual Commands & Button Handling
       // ==========================================
       
       if (text === "status") {
@@ -558,33 +621,46 @@ async function startBot() {
 
       if (text === "cart") {
         const cartSummary = getCartSummary(session.cart, botSettings);
-        await sock.sendMessage(sender, { text: cartSummary.text + "\nType *checkout* to place your order." });
+        if (session.cart.length === 0) {
+            await sendButtons(sock, sender, cartSummary.text, [ { text: "🌿 View Menu", id: "menu" } ]);
+        } else {
+            await sendButtons(sock, sender, cartSummary.text + "\nඔබට අවශ්‍ය පියවර තෝරන්න:", [
+                { text: "✅ Checkout", id: "checkout" },
+                { text: "🗑️ Clear Cart", id: "clear" },
+                { text: "🌿 Add More Plants", id: "menu" }
+            ]);
+        }
         return;
       }
 
       if (text === "clear") {
         session.cart = [];
-        await sock.sendMessage(sender, { text: "🗑️ Your cart has been emptied. Type *menu* to start fresh!" });
+        await sendButtons(sock, sender, "🗑️ Your cart has been emptied.", [
+           { text: "🌿 View Menu", id: "menu" }
+        ]);
         return;
       }
 
-      // Start checkout command
       if (text === "checkout") {
         if (session.cart.length === 0) {
-           await sock.sendMessage(sender, { text: "❌ Your cart is empty! Add some plants first by typing *menu*." });
+           await sendButtons(sock, sender, "❌ Your cart is empty! Add some plants first.", [
+              { text: "🌿 View Menu", id: "menu" }
+           ]);
            return;
         }
         session.step = "WAITING_FOR_NAME";
         session.checkoutData = {};
         const summary = getCartSummary(session.cart, botSettings);
-        await sock.sendMessage(sender, { text: `${summary.text}\n\n📝 *Checkout Process*\n\nඔබගේ order එක සම්පූර්ණ කිරීමට කරුණාකර ඔබගේ *සම්පූර්ණ නම* (Full Name) ඇතුලත් කරන්න:\n\n_(ඕනෑම වෙලාවක cancel කිරීමට *cancel* ලෙස type කරන්න)_` });
+        await sock.sendMessage(sender, { text: `${summary.text}\n📝 *Checkout Process*\n\nඔබගේ order එක සම්පූර්ණ කිරීමට කරුණාකර ඔබගේ *සම්පූර්ණ නම* (Full Name) ඇතුලත් කරන්න:\n\n_(ඕනෑම වෙලාවක cancel කිරීමට *cancel* ලෙස type කරන්න)_` });
         return;
       }
 
       if (text.includes("hi") || text.includes("hello") || text.includes("හායි")) {
-        await sock.sendMessage(sender, {
-          text: `👋 Hello ${customerName}! Welcome to *${botSettings.botName}* 🌿\nI am your AI Assistant. You can chat with me naturally to build your cart, or use commands:\n\n*menu* - Show plants\n*cart* - View cart\n*checkout* - Place order\n*status* - Track order\n\n_E.g. Just say "Show me the menu" or "I want to buy 2 red roses"._ 🪴`
-        });
+        await sendButtons(sock, sender, `👋 Hello ${customerName}! Welcome to *${botSettings.botName}* 🌿\nI am your AI Assistant.\n\nඔබට අවශ්‍ය සේවාව පහත බොත්තම් මගින් තෝරන්න, නැතිනම් මට අවශ්‍ය පැලයේ නම Type කරන්න (උදා: රතු රෝස පැල 2ක් ඕන). 🪴`, [
+            { text: "🌿 මෙනුව (Menu)", id: "menu" },
+            { text: "🛒 කරත්තය (Cart)", id: "cart" },
+            { text: "📦 Order Status", id: "status" }
+        ]);
         return;
       }
 
@@ -609,14 +685,22 @@ async function startBot() {
               });
           }
           if(itemsAdded > 0) {
-             await sock.sendMessage(sender, { text: aiResult.reply });
+             // Cart එකට ඇඩ් උනාට පස්සේ Buttons යවමු
+             await sendButtons(sock, sender, aiResult.reply, [
+                { text: "✅ Checkout", id: "checkout" },
+                { text: "🛒 View Cart", id: "cart" }
+             ]);
           } else {
-             await sock.sendMessage(sender, { text: "I couldn't find that exact plant in the catalog right now. Type *menu* to see what's available." });
+             await sendButtons(sock, sender, "මට ඔයා කියපු පැලේ හරියටම අඳුරගන්න බැරි වුණා. මෙනුව බලන්න.", [
+                { text: "🌿 View Menu", id: "menu" }
+             ]);
           }
       } 
       else if (aiResult.action === "CHECKOUT") {
           if (session.cart.length === 0) {
-            await sock.sendMessage(sender, { text: "Your cart is empty! You need to add items before checking out. Type *menu*." });
+            await sendButtons(sock, sender, "Your cart is empty! You need to add items before checking out.", [
+               { text: "🌿 View Menu", id: "menu" }
+            ]);
           } else {
             session.step = "WAITING_FOR_NAME";
             session.checkoutData = {};
@@ -625,7 +709,11 @@ async function startBot() {
       } 
       else if (aiResult.action === "VIEW_CART") {
           const cartSummary = getCartSummary(session.cart, botSettings);
-          await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n${cartSummary.text}\nType *checkout* to place your order.` });
+          await sendButtons(sock, sender, `${aiResult.reply}\n\n${cartSummary.text}`, [
+              { text: "✅ Checkout", id: "checkout" },
+              { text: "🗑️ Clear Cart", id: "clear" },
+              { text: "🌿 Add More Plants", id: "menu" }
+          ]);
       } 
       else if (aiResult.action === "SHOW_MENU") {
           await sock.sendMessage(sender, { text: aiResult.reply });
@@ -633,7 +721,9 @@ async function startBot() {
       }
       else if (aiResult.action === "CLEAR_CART") {
           session.cart = [];
-          await sock.sendMessage(sender, { text: aiResult.reply });
+          await sendButtons(sock, sender, aiResult.reply, [
+              { text: "🌿 View Menu", id: "menu" }
+          ]);
       }
       else {
           await sock.sendMessage(sender, { text: aiResult.reply });
