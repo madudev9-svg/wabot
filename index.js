@@ -89,7 +89,7 @@ function getStatusEmoji(status) {
     Preparing: "🪴",
     Packing: "📦",
     "Out for Delivery": "🚚",
-    Delivered: "✅",
+    Delivered: "🎉",
     Cancelled: "❌"
   };
 
@@ -102,7 +102,17 @@ function getStatusSinhala(status) {
     Preparing: "ඔයාගේ පැල order එක ලෑස්ති කරමින් තියෙනවා. 🪴",
     Packing: "ඔයාගේ පැල order එක pack කරමින් තියෙනවා. 📦",
     "Out for Delivery": "ඔයාගේ order එක delivery සඳහා පිටත් කරලා තියෙනවා. 🚚",
-    Delivered: "ඔයාගේ order එක සාර්ථකව deliver කරලා තියෙනවා. ✅",
+
+    Delivered:
+`🌿 *ඔබගේ Magiflora Order එක සාර්ථකව ලබා දී ඇත!* ✅
+
+ඔබ අපිට විශ්වාසයෙන් order කළාට ගොඩක් ස්තුතියි. 🪴💚
+ඔබගේ අලුත් පැලය ඔබේ ගෙවත්තට / නිවසට ලස්සනක් එකතු කරයි කියලා අපි හිතනවා.
+
+පැලය ගැන care tips, watering, sunlight ගැන අවශ්‍ය උනොත් anytime අපිට message කරන්න.
+
+*Thank you for choosing Magiflora!* 🌱`,
+
     Cancelled: "ඔයාගේ order එක cancel කරලා තියෙනවා. වැඩි විස්තර සඳහා අපිව contact කරන්න. ❌"
   };
 
@@ -329,9 +339,7 @@ Items: ${items}
 Previous Status: ${oldStatus || "Placed"}
 New Status: *${newStatus}*
 
-${getStatusSinhala(newStatus)}
-
-Thank you for ordering from Magiflora. 🪴`
+${getStatusSinhala(newStatus)}`
   });
 
   await firebasePatch(`orders/${id}`, {
