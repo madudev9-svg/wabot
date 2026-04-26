@@ -13,8 +13,6 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const orderStates = {};
 const menuCache = {};
-const lastKnownStatuses = {};
-
 let dbStatusListenerStarted = false;
 
 function cleanPhoneNumber(phone) {
@@ -23,6 +21,7 @@ function cleanPhoneNumber(phone) {
 }
 
 function makeOrderId(firebaseId) {
+  if (!firebaseId) return "#ORDER";
   return `#${firebaseId.substring(1, 7).toUpperCase()}`;
 }
 
@@ -31,10 +30,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal
-    });
+    const res = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(timer);
     return res;
   } catch (error) {
@@ -79,16 +75,12 @@ async function firebasePatch(path, data) {
   return await res.json();
 }
 
-function getStatusSinhala(status) {
-  const map = {
-    Placed: "ඔයාගේ order එක confirm වෙලා තියෙනවා. අපි ඉක්මනින් process කරනවා. 🌿",
-    Preparing: "ඔයාගේ පැල order එක ලෑස්ති කරමින් තියෙනවා. 🪴",
-    Packing: "ඔයාගේ පැල order එක pack කරමින් තියෙනවා. 📦",
-    "Out for Delivery": "ඔයාගේ order එක delivery සඳහා පිටත් කරලා තියෙනවා. 🚚",
-    Delivered: "ඔයාගේ order එක සාර්ථකව deliver කරලා තියෙනවා. ✅"
-  };
-
-  return map[status] || `ඔයාගේ order status එක දැන්: ${status}`;
+function getMessageText(msg) {
+  return (
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    ""
+  );
 }
 
 function getStatusEmoji(status) {
@@ -97,18 +89,24 @@ function getStatusEmoji(status) {
     Preparing: "🪴",
     Packing: "📦",
     "Out for Delivery": "🚚",
-    Delivered: "✅"
+    Delivered: "✅",
+    Cancelled: "❌"
   };
 
   return map[status] || "📦";
 }
 
-function getMessageText(msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    ""
-  );
+function getStatusSinhala(status) {
+  const map = {
+    Placed: "ඔයාගේ order එක confirm වෙලා තියෙනවා. අපි ඉක්මනින් process කරනවා. 🌿",
+    Preparing: "ඔයාගේ පැල order එක ලෑස්ති කරමින් තියෙනවා. 🪴",
+    Packing: "ඔයාගේ පැල order එක pack කරමින් තියෙනවා. 📦",
+    "Out for Delivery": "ඔයාගේ order එක delivery සඳහා පිටත් කරලා තියෙනවා. 🚚",
+    Delivered: "ඔයාගේ order එක සාර්ථකව deliver කරලා තියෙනවා. ✅",
+    Cancelled: "ඔයාගේ order එක cancel කරලා තියෙනවා. වැඩි විස්තර සඳහා අපිව contact කරන්න. ❌"
+  };
+
+  return map[status] || `ඔයාගේ order status එක දැන්: ${status}`;
 }
 
 async function getMenuFromApp() {
@@ -165,7 +163,8 @@ async function startOrder(sock, sender, customerName, customerWaNumber, item) {
     step: "WAITING_FOR_ADDRESS",
     item,
     customerName,
-    phone: customerWaNumber
+    phone: customerWaNumber,
+    customerJid: sender
   };
 
   const captionText =
@@ -189,7 +188,7 @@ Price: *Rs${item.price}*
   }
 }
 
-async function getCustomerOrders(customerWaNumber) {
+async function getCustomerOrders(customerWaNumber, senderJid) {
   try {
     const data = await firebaseGet("orders");
     if (!data) return [];
@@ -200,9 +199,12 @@ async function getCustomerOrders(customerWaNumber) {
       .map(([id, order]) => ({ id, ...order }))
       .filter(order => {
         const savedPhone = cleanPhoneNumber(order.phone);
+
         return (
           savedPhone === currentPhone ||
-          order.userId === `whatsapp_${currentPhone}`
+          order.userId === `whatsapp_${currentPhone}` ||
+          order.customerJid === senderJid ||
+          order.notifyJid === senderJid
         );
       })
       .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
@@ -213,7 +215,7 @@ async function getCustomerOrders(customerWaNumber) {
 }
 
 async function sendCustomerStatus(sock, sender, customerWaNumber) {
-  const orders = await getCustomerOrders(customerWaNumber);
+  const orders = await getCustomerOrders(customerWaNumber, sender);
 
   if (orders.length === 0) {
     await sock.sendMessage(sender, {
@@ -308,10 +310,13 @@ ${menuText}
 }
 
 async function sendStatusUpdateToCustomer(sock, id, order, oldStatus, newStatus) {
-  const phone = cleanPhoneNumber(order.phone);
-  if (!phone) return;
+  const jid = order.notifyJid || order.customerJid;
 
-  const jid = `${phone}@s.whatsapp.net`;
+  if (!jid) {
+    console.log(`❌ No customer JID found for order ${id}`);
+    return;
+  }
+
   const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
 
   await sock.sendMessage(jid, {
@@ -334,7 +339,7 @@ Thank you for ordering from Magiflora. 🪴`
     lastNotifiedAt: new Date().toISOString()
   });
 
-  console.log(`✅ Auto status message sent to ${phone}: ${newStatus}`);
+  console.log(`✅ Auto status message sent to ${jid}: ${newStatus}`);
 }
 
 function listenOrderStatusChanges(sock) {
@@ -349,34 +354,26 @@ function listenOrderStatusChanges(sock) {
       if (!orders) return;
 
       for (const [id, order] of Object.entries(orders)) {
-        if (!order.phone || !order.status) continue;
+        if (!order.status) continue;
 
         const currentStatus = order.status;
-        const previousStatus = lastKnownStatuses[id];
+        const lastNotified = order.lastNotifiedStatus || "Placed";
 
-        if (!previousStatus) {
-          lastKnownStatuses[id] = currentStatus;
-          continue;
-        }
+        if (currentStatus === "Placed") continue;
+        if (currentStatus === lastNotified) continue;
 
-        if (previousStatus !== currentStatus) {
-          lastKnownStatuses[id] = currentStatus;
-
-          if (order.lastNotifiedStatus === currentStatus) continue;
-
-          await sendStatusUpdateToCustomer(
-            sock,
-            id,
-            order,
-            previousStatus,
-            currentStatus
-          );
-        }
+        await sendStatusUpdateToCustomer(
+          sock,
+          id,
+          order,
+          lastNotified,
+          currentStatus
+        );
       }
     } catch (error) {
       console.log("Status listener error:", error.message);
     }
-  }, 30000);
+  }, 20000);
 }
 
 async function startBot() {
@@ -452,6 +449,10 @@ async function startBot() {
           userEmail: customerName,
           customerName,
           whatsappName: customerName,
+
+          customerJid: sender,
+          notifyJid: sender,
+
           phone: customerWaNumber,
           address: rawText,
           customerDetails: rawText,
