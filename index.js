@@ -132,7 +132,7 @@ async function getMenuFromApp() {
       id: key,
       name: data[key].name,
       price: parseFloat(data[key].price),
-      weight: parseInt(data[key].weight) || 1000, // Default to 1000g (1KG) if weight is missing
+      weight: parseInt(data[key].weight) || 1000, 
       imageUrl: data[key].imageUrl || ""
     }));
   } catch (error) {
@@ -192,11 +192,10 @@ function getCartSummary(cart, botSettings) {
     text += `${index + 1}. *${item.name}*\n   ${item.qty} x Rs${item.price.toFixed(2)} = Rs${itemTotal.toFixed(2)}\n`;
   });
 
-  // Calculate Delivery Fee based on weight
   let deliveryFee = botSettings.deliveryBaseFee;
   if (totalWeightGrams > 1000) {
       const extraWeight = totalWeightGrams - 1000;
-      const extraKGs = Math.ceil(extraWeight / 1000); // Math.ceil rounds up (e.g. 200g -> 1KG extra)
+      const extraKGs = Math.ceil(extraWeight / 1000); 
       deliveryFee += (extraKGs * botSettings.deliveryExtraFee);
   }
 
@@ -259,6 +258,7 @@ VALID ACTIONS:
 - "VIEW_CART": If the user asks what is in their cart or asks for total.
 - "SHOW_MENU": If the user asks to see plants or prices.
 - "CLEAR_CART": If the user wants to empty their cart or cancel the current cart.
+- "CHECK_STATUS": If the user asks to check their order status, track their order, or asks about past orders (e.g. "mage order eka mokada wune", "order status", "order ekagana balanna").
 - "NONE": For general chit-chat, plant care advice, or unrecognized requests.
 
 RULES:
@@ -370,20 +370,17 @@ function listenOrderStatusChanges(sock) {
         let messageToSend = null;
         let updatePayload = {};
 
-        // 1. Check for Status changes
         if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
           const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
           messageToSend = `${getStatusEmoji(currentStatus)} *Magiflora Order Update* 🌿\n\nOrder ID: ${makeOrderId(id)}\nItems: ${items}\n\nPrevious Status: ${lastNotified}\nNew Status: *${currentStatus}*\n\n${getStatusSinhala(currentStatus)}`;
           updatePayload.lastNotifiedStatus = currentStatus;
           updatePayload.lastNotifiedAt = new Date().toISOString();
         } 
-        // 2. Check for Detail Edit changes from Admin Panel
         else if (currentEditTimestamp > lastNotifiedEdit) {
           messageToSend = `📝 *Magiflora Order Details Updated* 🌿\n\nOrder ID: ${makeOrderId(id)}\n\nඅපි ඔබගේ ඕඩර් එකේ විස්තර යාවත්කාලීන කර ඇත. (We have updated your order details).\n\n*Name:* ${order.customerName}\n*Address:* ${order.address}\n*Phone 1:* ${order.phone1}\n*Phone 2:* ${order.phone2 || 'N/A'}\n\nගැටළුවක් ඇත්නම් කරුණාකර අපව දැනුවත් කරන්න.`;
           updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
         }
 
-        // Send message if needed and patch database
         if (messageToSend) {
           const jid = order.notifyJid || order.customerJid;
           if (jid) {
@@ -396,7 +393,7 @@ function listenOrderStatusChanges(sock) {
     } catch (error) {
       console.log("Status listener error:", error.message);
     }
-  }, 20000); // Check every 20 seconds
+  }, 20000); 
 }
 
 // ---------------------------------------------------------
@@ -468,7 +465,7 @@ async function startBot() {
       const currentMenu = await getMenuFromApp();
       const botSettings = await getBotSettings();
 
-      // Check for cancel command anytime during checkout
+      // Checkout chya veli kadhihi cancel command tadasa
       if (text === "cancel" && session.step !== "IDLE") {
           session.step = "IDLE";
           session.checkoutData = {};
@@ -508,12 +505,12 @@ async function startBot() {
 
           const plantOrder = {
             userId: "whatsapp_" + customerWaNumber,
-            userEmail: session.checkoutData.name, // Using name as identifier fallback
+            userEmail: session.checkoutData.name, 
             customerName: session.checkoutData.name,
             whatsappName: customerName,
             customerJid: sender,
             notifyJid: sender,
-            phone: session.checkoutData.phone1, // Primary phone
+            phone: session.checkoutData.phone1, 
             phone1: session.checkoutData.phone1,
             phone2: session.checkoutData.phone2,
             address: session.checkoutData.address,
@@ -536,7 +533,7 @@ async function startBot() {
             source: "WhatsApp Bot",
             timestamp: new Date().toISOString(),
             lastNotifiedStatus: "Placed",
-            lastEditTimestamp: 0 // Initialize edit tracker
+            lastEditTimestamp: 0 
           };
 
           try {
@@ -547,7 +544,6 @@ async function startBot() {
               text: `✅ *Order Placed Successfully!* 🌿\n\nThank you ${session.checkoutData.name}!\nඅපි ඔබගේ ඕඩර් එක සාර්ථකව ලබා ගත්තා.\n\nOrder ID: ${orderId !== "new" ? makeOrderId(orderId) : "Pending"}\nTotal Weight: ${(totalWeightGrams / 1000).toFixed(2)}kg\nTotal to Pay: *Rs${total.toFixed(2)}*\nPayment: Cash on Delivery\nStatus: *Placed*\n\n📦 Type *status* anytime to track your plants. 🪴`
             });
             
-            // Clear cart after successful order
             session.cart = [];
             session.checkoutData = {};
             session.step = "IDLE";
@@ -559,7 +555,7 @@ async function startBot() {
       }
 
       // ==========================================
-      // Exact Manual Commands (Fast Path)
+      // Exact Manual Commands
       // ==========================================
       
       if (text === "status") {
@@ -588,7 +584,6 @@ async function startBot() {
         return;
       }
 
-      // Start checkout command
       if (text === "checkout") {
         if (session.cart.length === 0) {
            await sock.sendMessage(sender, { text: "❌ Your cart is empty! Add some plants first.\n👉 මෙනුව බැලීමට *menu* ලෙස type කරන්න." });
@@ -616,7 +611,7 @@ async function startBot() {
       const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, botSettings);
       
       if (aiResult.action === "ADD_TO_CART") {
-          let itemsAdded = 0;
+          let itemsAdded = [];
           if (Array.isArray(aiResult.actionDetails)) {
               aiResult.actionDetails.forEach(actionItem => {
                   const menuItem = currentMenu.find(m => m.id === actionItem.id);
@@ -624,11 +619,26 @@ async function startBot() {
                       const existingItem = session.cart.find(c => c.id === menuItem.id);
                       if (existingItem) existingItem.qty += actionItem.qty;
                       else session.cart.push({ ...menuItem, qty: actionItem.qty });
-                      itemsAdded++;
+                      itemsAdded.push(menuItem); // Photo yawanata list ekata damuwa
                   }
               });
           }
-          if(itemsAdded > 0) {
+          if(itemsAdded.length > 0) {
+             // Photo send kireema
+             for (let i = 0; i < itemsAdded.length; i++) {
+                 let item = itemsAdded[i];
+                 if (item.imageUrl) {
+                     try {
+                         await sock.sendMessage(sender, { 
+                             image: { url: item.imageUrl }, 
+                             caption: `🪴 *${item.name}*\nRs${item.price.toFixed(2)}` 
+                         });
+                     } catch (e) {
+                         console.error("Image yaveeme doshayak:", e);
+                     }
+                 }
+             }
+
              await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n👉 Order එක ප්ලේස් කිරීමට *checkout* ලෙස type කරන්න.\n👉 තවත් පැල බැලීමට *menu* ලෙස type කරන්න.` });
           } else {
              await sock.sendMessage(sender, { text: "මට ඔයා කියපු පැලේ හරියටම අඳුරගන්න බැරි වුණා.\n👉 කරුණාකර *menu* ලෙස type කර මෙනුව බලන්න." });
@@ -654,6 +664,14 @@ async function startBot() {
       else if (aiResult.action === "CLEAR_CART") {
           session.cart = [];
           await sock.sendMessage(sender, { text: `${aiResult.reply}\n👉 අලුතින් පටන් ගැනීමට *menu* ලෙස type කරන්න.` });
+      }
+      else if (aiResult.action === "CHECK_STATUS") {
+          // Send conversational reply first (if any)
+          if (aiResult.reply && aiResult.reply !== "I didn't quite get that.") {
+              await sock.sendMessage(sender, { text: aiResult.reply });
+          }
+          // Trigger normal status check
+          await sendCustomerStatus(sock, sender, customerWaNumber);
       }
       else {
           await sock.sendMessage(sender, { text: aiResult.reply });
