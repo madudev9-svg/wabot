@@ -157,7 +157,13 @@ async function generateNaturalMessage(instruction, botSettings, customerName = "
     
     CRITICAL TASK: ${instruction}
     
-    Respond DIRECTLY to the customer. Do NOT use JSON. Do NOT wrap in quotes. Do NOT use markdown code blocks. Just output the natural message.`;
+    IMPORTANT RULES FOR THE RESPONSE:
+    - Respond DIRECTLY to the customer as a single flowing paragraph or a couple of short, chatty paragraphs. 
+    - NEVER format your response as a list with bullet points or bold labels like "Order ID: ", "Total:", etc. 
+    - Weave all the information (like Order ID, price, items, status) naturally into your conversational sentences.
+    - Example of what to avoid: "Order ID: 1234\\nStatus: Placed\\nTotal: Rs500"
+    - Example of what to do: "Oyaa order karapu plants tika hariyata add wuna! 🥰 Oyage order eka #1234 wenawa. Mulu bill eka Rs500i. Mama eka danma process karannamko! 🌸"
+    - Do NOT use JSON. Do NOT wrap in quotes. Just output the natural message.`;
 
     try {
         const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
@@ -255,7 +261,7 @@ JSON FORMAT REQUIRED:
 VALID ACTIONS:
 - "ADD_TO_CART": If user wants to add items. You MUST include "actionDetails".
 - "CHECKOUT": If user wants to finalize order. (In your reply, sweetly ask for their full name to begin).
-- "VIEW_CART": If user asks what is in their cart or total. (Summarize the cart beautifully inside your reply).
+- "VIEW_CART": If user asks what is in their cart or total. (Summarize the cart beautifully inside your reply without making it look like a list).
 - "SHOW_MENU": If user asks to see plants or prices.
 - "CLEAR_CART": If user wants to cancel their cart.
 - "CHECK_STATUS": If user asks for order status, tracking, or history. (Check the 'RECENT ORDERS' context and tell them their status naturally inside your reply!).
@@ -263,8 +269,9 @@ VALID ACTIONS:
 
 RULES:
 - Put ALL your conversational text inside "reply". Never send multiple messages. 
-- Make sure "reply" alone provides a full, beautiful answer to the customer.
-- Map item names or numbers to correct catalog ID.
+- Make sure "reply" alone provides a full, beautiful answer to the customer in a conversational way. Do not output robotic lists.
+- Map item names or numbers to correct catalog ID in the "actionDetails" array.
+- CRITICAL: NEVER mention the internal catalog 'ID' (e.g., -Or8AZRfc...) to the customer in your "reply". If you need to refer to a plant, use ONLY its regular Name.
 - ALWAYS be sweet.`;
 
   try {
@@ -350,12 +357,12 @@ function listenOrderStatusChanges() {
 
             if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
               const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
-              messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally.`, botSettings, order.customerName);
+              messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally. Remember to weave the info into sentences, no lists.`, botSettings, order.customerName);
               updatePayload.lastNotifiedStatus = currentStatus;
               updatePayload.lastNotifiedAt = new Date().toISOString();
             } 
             else if (currentEditTimestamp > lastNotifiedEdit) {
-              messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry.`, botSettings, order.customerName);
+              messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry. Avoid using list formats.`, botSettings, order.customerName);
               updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
             }
 
@@ -527,7 +534,10 @@ async function startBot() {
             const saved = await firebasePost("orders", plantOrder);
             const orderId = saved?.name || "new";
 
-            const successPrompt = `The customer ${session.checkoutData.name} has successfully placed an order! Order ID is ${makeOrderId(orderId)}. The total weight is ${(totalWeightGrams / 1000).toFixed(2)}kg and the total bill (with delivery) is Rs${total.toFixed(2)}. They will pay by Cash on Delivery. Thank them warmly and beautifully for ordering with Magiflora and tell them you are processing it right away!`;
+            const successPrompt = `The customer ${session.checkoutData.name} has successfully placed an order! Order ID is ${makeOrderId(orderId)}. The total weight is ${(totalWeightGrams / 1000).toFixed(2)}kg and the total bill (with delivery) is Rs${total.toFixed(2)}. They will pay by Cash on Delivery. 
+            
+            Thank them warmly and beautifully for ordering with Magiflora and tell them you are processing it right away! 
+            IMPORTANT: Weave the order ID, weight, and total bill into conversational sentences like "Ayyooo madu! 🥰 Thank you sooooo much... Oyage order eka #1234 wenawa. Mulu bill eka delivery ekkath ekka Rs26550 kiyala thiyenawa." DO NOT use lists or bold labels.`;
             const reply = await generateNaturalMessage(successPrompt, botSettings, session.checkoutData.name);
             await sock.sendMessage(sender, { text: reply });
             
