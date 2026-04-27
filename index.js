@@ -14,6 +14,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 // Track user shopping sessions (Carts & Checkout Steps)
 const userSessions = {};
 let dbStatusListenerStarted = false;
+let globalSock = null; // NEW: Global socket reference for the auto-listener
 
 // Default Bot Settings
 const DEFAULT_SETTINGS = {
@@ -314,45 +315,52 @@ async function getCustomerOrders(customerWaNumber, senderJid) {
 }
 
 // Listens for both Status Changes and Detail Edits
-function listenOrderStatusChanges(sock) {
+function listenOrderStatusChanges() {
   if (dbStatusListenerStarted) return;
   dbStatusListenerStarted = true;
   console.log("📡 Natural Order status & edit listener started...");
 
   setInterval(async () => {
+    if (!globalSock) return; // Prevent crashes if socket drops
+    
     try {
       const orders = await firebaseGet("orders");
       if (!orders) return;
       const botSettings = await getBotSettings(); // Fetch current persona
 
       for (const [id, order] of Object.entries(orders)) {
-        const currentStatus = order.status || "Placed";
-        const lastNotified = order.lastNotifiedStatus || "Placed";
-        
-        const currentEditTimestamp = order.lastEditTimestamp || 0;
-        const lastNotifiedEdit = order.lastNotifiedEditTimestamp || 0;
+        try {
+            const currentStatus = order.status || "Placed";
+            const lastNotified = order.lastNotifiedStatus || "Placed";
+            
+            const currentEditTimestamp = order.lastEditTimestamp || 0;
+            const lastNotifiedEdit = order.lastNotifiedEditTimestamp || 0;
 
-        let messageToSend = null;
-        let updatePayload = {};
+            let messageToSend = null;
+            let updatePayload = {};
 
-        if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
-          const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
-          messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally.`, botSettings, order.customerName);
-          updatePayload.lastNotifiedStatus = currentStatus;
-          updatePayload.lastNotifiedAt = new Date().toISOString();
-        } 
-        else if (currentEditTimestamp > lastNotifiedEdit) {
-          messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry.`, botSettings, order.customerName);
-          updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
-        }
+            if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
+              const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
+              messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally.`, botSettings, order.customerName);
+              updatePayload.lastNotifiedStatus = currentStatus;
+              updatePayload.lastNotifiedAt = new Date().toISOString();
+            } 
+            else if (currentEditTimestamp > lastNotifiedEdit) {
+              messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry.`, botSettings, order.customerName);
+              updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
+            }
 
-        if (messageToSend) {
-          const jid = order.notifyJid || order.customerJid;
-          if (jid) {
-            await sock.sendMessage(jid, { text: messageToSend });
-            await firebasePatch(`orders/${id}`, updatePayload);
-            console.log(`✅ Natural status message sent to ${jid}`);
-          }
+            if (messageToSend) {
+              const jid = order.notifyJid || order.customerJid;
+              if (jid) {
+                // Now safely using the global updated socket
+                await globalSock.sendMessage(jid, { text: messageToSend });
+                await firebasePatch(`orders/${id}`, updatePayload);
+                console.log(`✅ Natural status message sent to ${jid}`);
+              }
+            }
+        } catch (innerError) {
+             console.log(`Error updating status for order ${id}:`, innerError.message);
         }
       }
     } catch (error) {
@@ -382,6 +390,8 @@ async function startBot() {
     browser: ["Magiflora AI", "Chrome", "2.0"]
   });
 
+  globalSock = sock; // Update the global socket reference!
+
   sock.ev.on("connection.update", update => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -395,7 +405,7 @@ async function startBot() {
 
     if (connection === "open") {
       console.log("✅ Magiflora Natural AI Bot is ONLINE!");
-      listenOrderStatusChanges(sock);
+      listenOrderStatusChanges(); // Starts loop if not already running
     }
 
     if (connection === "close") {
