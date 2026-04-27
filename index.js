@@ -14,7 +14,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 // Track user shopping sessions (Carts & Checkout Steps)
 const userSessions = {};
 let dbStatusListenerStarted = false;
-let globalSock = null; // NEW: Global socket reference for the auto-listener
+let globalSock = null; // Global socket reference for the auto-listener
 
 // Default Bot Settings
 const DEFAULT_SETTINGS = {
@@ -208,16 +208,21 @@ function calculateCartData(cart, botSettings) {
 // JSON-Based AI Agent (For Intent Parsing & Add to Cart)
 // ---------------------------------------------------------
 
-async function askAIAgent(userText, customerName, currentMenu, currentCart, botSettings) {
+async function askAIAgent(userText, customerName, currentMenu, currentCart, recentOrders, botSettings) {
   if (!OPENROUTER_API_KEY) return { reply: "Ayyoo, AI service eka wada naane! 🥺", action: "NONE" };
 
   const menuContext = currentMenu.length
     ? currentMenu.map(m => `Num: ${m.displayId} | ID: ${m.id} | Name: ${m.name} | Price: Rs${m.price}`).join("\n")
     : "No plants are currently listed.";
 
+  const { total, subtotal, deliveryFee } = calculateCartData(currentCart, botSettings);
   const cartContext = currentCart.length
-    ? currentCart.map(c => `- ${c.qty}x ${c.name} (Rs${c.price * c.qty})`).join("\n")
+    ? `Items: ${currentCart.map(c => `${c.qty}x ${c.name}`).join(", ")} | Subtotal: Rs${subtotal} | Delivery: Rs${deliveryFee} | Total to pay: Rs${total}`
     : "Cart is empty.";
+
+  const ordersContext = recentOrders.length
+    ? recentOrders.map(o => `Order ID: ${makeOrderId(o.id)} | Status: ${o.status} | Total: Rs${o.total} | Items: ${o.items.map(i=>i.quantity+'x '+i.name).join(', ')}`).join("\n")
+    : "No active or past orders.";
 
   const systemPrompt = `You are ${botSettings.botName}, a sweet Sri Lankan teenage girl working at Magiflora.
 Customer name: ${customerName}
@@ -231,6 +236,9 @@ ${menuContext}
 
 CUSTOMER'S CURRENT CART:
 ${cartContext}
+
+CUSTOMER'S RECENT ORDERS (Use this to answer status queries!):
+${ordersContext}
 
 CRITICAL INSTRUCTION:
 You MUST reply with ONLY a raw JSON object. Do not include markdown formatting (like \`\`\`json). Just the JSON string. 
@@ -246,17 +254,18 @@ JSON FORMAT REQUIRED:
 
 VALID ACTIONS:
 - "ADD_TO_CART": If user wants to add items. You MUST include "actionDetails".
-- "CHECKOUT": If user wants to finalize order.
-- "VIEW_CART": If user asks what is in their cart or total.
+- "CHECKOUT": If user wants to finalize order. (In your reply, sweetly ask for their full name to begin).
+- "VIEW_CART": If user asks what is in their cart or total. (Summarize the cart beautifully inside your reply).
 - "SHOW_MENU": If user asks to see plants or prices.
 - "CLEAR_CART": If user wants to cancel their cart.
-- "CHECK_STATUS": If user asks for order status, tracking, or history.
+- "CHECK_STATUS": If user asks for order status, tracking, or history. (Check the 'RECENT ORDERS' context and tell them their status naturally inside your reply!).
 - "NONE": General chat.
 
 RULES:
+- Put ALL your conversational text inside "reply". Never send multiple messages. 
+- Make sure "reply" alone provides a full, beautiful answer to the customer.
 - Map item names or numbers to correct catalog ID.
-- ALWAYS be sweet in your "reply".
-- Never fake prices.`;
+- ALWAYS be sweet.`;
 
   try {
     const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
@@ -449,7 +458,7 @@ async function startBot() {
       }
 
       // ==========================================
-      // Step-by-Step Checkout Flow (Now AI Generated)
+      // Step-by-Step Checkout Flow
       // ==========================================
       
       if (session.step === "WAITING_FOR_NAME") {
@@ -533,32 +542,14 @@ async function startBot() {
       }
 
       // ==========================================
-      // Manual Commands via AI
-      // ==========================================
-
-      if (text === "menu") {
-          if (currentMenu.length === 0) {
-              const reply = await generateNaturalMessage("Tell the customer our plant catalog is empty/updating right now and ask them to check later sweetly.", botSettings, customerName);
-              await sock.sendMessage(sender, { text: reply });
-              return;
-          }
-          
-          let menuStr = currentMenu.map(i => `${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
-          const reply = await generateNaturalMessage(`Show this plant menu to the customer beautifully:\n\n${menuStr}\n\nTell them to just reply with what they want to add!`, botSettings, customerName);
-          await sock.sendMessage(sender, { text: reply });
-          return;
-      }
-
-      if (text === "cart" || text === "checkout" || text === "clear" || text.includes("hi") || text.includes("hello") || text.includes("හායි")) {
-         // Let the askAIAgent handle these through intent matching!
-         // This ensures EVERYTHING flows naturally.
-      }
-
-      // ==========================================
       // AI Agent Parsing (Natural Language)
       // ==========================================
       
-      const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, botSettings);
+      // Fetch recent orders to inject into AI memory! (This fixes the missing status issue)
+      const allOrders = await getCustomerOrders(customerWaNumber, sender);
+      const recentOrders = allOrders.slice(0, 3); // Provide the 3 most recent orders for context
+      
+      const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, recentOrders, botSettings);
       
       if (aiResult.action === "ADD_TO_CART") {
           let itemsAdded = [];
@@ -569,81 +560,58 @@ async function startBot() {
                       const existingItem = session.cart.find(c => c.id === menuItem.id);
                       if (existingItem) existingItem.qty += actionItem.qty;
                       else session.cart.push({ ...menuItem, qty: actionItem.qty });
-                      itemsAdded.push(menuItem); // Save to send photo
+                      itemsAdded.push(menuItem); 
                   }
               });
           }
+          
           if(itemsAdded.length > 0) {
-             // Send Photos
+             let sentImages = 0;
+             // Send photos, but attach the AI's natural reply text to the VERY LAST photo
              for (let i = 0; i < itemsAdded.length; i++) {
                  let item = itemsAdded[i];
                  if (item.imageUrl) {
+                     let isLast = (i === itemsAdded.length - 1);
+                     let captionText = isLast ? `🪴 ${item.name}\n\n${aiResult.reply}` : `🪴 ${item.name}`;
                      try {
-                         await sock.sendMessage(sender, { 
-                             image: { url: item.imageUrl }, 
-                             caption: `🪴 ${item.name}` 
-                         });
+                         await sock.sendMessage(sender, { image: { url: item.imageUrl }, caption: captionText });
+                         sentImages++;
                      } catch (e) {}
                  }
              }
-             await sock.sendMessage(sender, { text: aiResult.reply });
+             // Fallback if no images were available/sent
+             if (sentImages === 0) {
+                 await sock.sendMessage(sender, { text: aiResult.reply });
+             }
           } else {
-             const reply = await generateNaturalMessage("The customer asked for a plant not in the menu. Tell them sweetly you couldn't find it and they should look at the menu.", botSettings, customerName);
-             await sock.sendMessage(sender, { text: reply });
+             // Failed to match item ID, just send reply
+             await sock.sendMessage(sender, { text: `${aiResult.reply}\n(Poddak inna, mata ehema plant ekak hambune naane 🥺 Menu eke thiyena namama kiyannako)` });
           }
       } 
       else if (aiResult.action === "CHECKOUT") {
           if (session.cart.length === 0) {
-            const reply = await generateNaturalMessage("The customer wants to checkout, but their cart is empty. Remind them sweetly to add plants first.", botSettings, customerName);
-            await sock.sendMessage(sender, { text: reply });
+            await sock.sendMessage(sender, { text: aiResult.reply });
           } else {
             session.step = "WAITING_FOR_NAME";
             session.checkoutData = {};
-            const reply = await generateNaturalMessage("The customer is ready to checkout! Ask them for their full name to start processing the order. Be sweet.", botSettings, customerName);
-            await sock.sendMessage(sender, { text: reply });
-          }
-      } 
-      else if (aiResult.action === "VIEW_CART") {
-          if (session.cart.length === 0) {
-             const reply = await generateNaturalMessage("Customer asked to see cart, but it is empty. Tell them nicely.", botSettings, customerName);
-             await sock.sendMessage(sender, { text: reply });
-          } else {
-             const { total, subtotal, deliveryFee, totalWeightGrams } = calculateCartData(session.cart, botSettings);
-             const cartStr = session.cart.map(c => `${c.qty}x ${c.name} (Rs${c.price * c.qty})`).join(", ");
-             const prompt = `Customer wants to see their cart. Items: ${cartStr}. Subtotal: Rs${subtotal}. Delivery: Rs${deliveryFee}. Total to pay: Rs${total}. Weight: ${totalWeightGrams/1000}kg. Present this information beautifully and sweetly. Tell them they can say 'checkout' when ready.`;
-             const reply = await generateNaturalMessage(prompt, botSettings, customerName);
-             await sock.sendMessage(sender, { text: reply });
+            await sock.sendMessage(sender, { text: aiResult.reply });
           }
       } 
       else if (aiResult.action === "SHOW_MENU") {
-          await sock.sendMessage(sender, { text: aiResult.reply });
-          
           if (currentMenu.length > 0) {
-              let menuStr = currentMenu.map(i => `${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
-              const reply = await generateNaturalMessage(`Show this menu beautifully:\n\n${menuStr}`, botSettings, customerName);
-              await sock.sendMessage(sender, { text: reply });
+              let menuStr = currentMenu.map(i => `🌸 ${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
+              // Append the menu nicely directly underneath the AI's reply, preventing a separate message popup
+              await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n${menuStr}` });
+          } else {
+              await sock.sendMessage(sender, { text: aiResult.reply });
           }
       }
       else if (aiResult.action === "CLEAR_CART") {
           session.cart = [];
-          const reply = await generateNaturalMessage("Customer cleared their cart. Say 'no problem' and tell them they can start over anytime.", botSettings, customerName);
-          await sock.sendMessage(sender, { text: reply });
-      }
-      else if (aiResult.action === "CHECK_STATUS") {
-          const orders = await getCustomerOrders(customerWaNumber, sender);
-          if (orders.length === 0) {
-              const reply = await generateNaturalMessage("Customer asked for their order status, but they have no orders placed. Tell them this very sweetly.", botSettings, customerName);
-              await sock.sendMessage(sender, { text: reply });
-          } else {
-              const latest = orders[0];
-              const items = latest.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "No items";
-              const prompt = `Customer asked for order status. Tell them sweetly: Order ID is ${makeOrderId(latest.id)}, items are [${items}], Total is Rs${latest.total}, and the current status is '${latest.status || 'Placed'}'. Add a nice reassuring comment.`;
-              const reply = await generateNaturalMessage(prompt, botSettings, customerName);
-              await sock.sendMessage(sender, { text: reply });
-          }
+          await sock.sendMessage(sender, { text: aiResult.reply });
       }
       else {
-          // General conversational reply (e.g., Hello, Thanks, Plant questions)
+          // This safely handles VIEW_CART, CHECK_STATUS, and NONE intent natively via aiResult.reply
           await sock.sendMessage(sender, { text: aiResult.reply });
       }
 
