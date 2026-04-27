@@ -18,10 +18,10 @@ let globalSock = null; // Global socket reference for the auto-listener
 
 // Default Bot Settings
 const DEFAULT_SETTINGS = {
-  botName: "Madu", // Sweet teen name by default
+  botName: "Madu",
   deliveryBaseFee: 425, // First 1KG fee
   deliveryExtraFee: 125, // Per additional 1KG fee
-  systemPrompt: "You are a very sweet, friendly Sri Lankan teenage girl helping customers order plants at Magiflora. Talk in very natural conversational Singlish or Sinhala. Use cute emojis like 🥰, 🌸, ✨, 🥺. Treat the customer like a close friend. Never act like a robot or use highly formal words."
+  systemPrompt: "You are Madu, a friendly and professional customer service assistant at Magiflora. Reply in the exact same language the customer uses (Sinhala, Singlish, or English). Keep your answers clear, concise, and nicely formatted with line breaks. Be polite and helpful, but maintain a professional boundary."
 };
 
 // ---------------------------------------------------------
@@ -139,18 +139,14 @@ async function getBotSettings() {
 }
 
 // ---------------------------------------------------------
-// NEW: AI Natural Message Generator
+// NEW: AI Natural Message Generator (Formatted cleanly)
 // ---------------------------------------------------------
-// Generates contextual, natural messages WITHOUT requiring JSON parsing.
-// Perfect for checkout steps, status updates, and notifications.
-async function generateNaturalMessage(instruction, botSettings, customerName = "Yaaluwa") {
+async function generateNaturalMessage(instruction, botSettings, customerName = "Customer", customerMessage = "") {
     if (!OPENROUTER_API_KEY) return "Ayyoo, AI service eka wada naane! 🥺 Tikakin try karannako.";
 
-    const systemPrompt = `You are ${botSettings.botName}, a sweet, friendly Sri Lankan teenage girl who loves plants and works at Magiflora. 
-    You are chatting on WhatsApp. Talk in very natural conversational Singlish or Sinhala. 
-    Use cute emojis like 🥰, 🌸, ✨, 🥺. 
-    NEVER sound like a robot, an AI language model, or use highly formal templates. Treat the customer like a close friend. 
+    const systemPrompt = `You are ${botSettings.botName}, a professional, polite, and friendly customer service assistant at Magiflora. 
     Customer Name: ${customerName}.
+    Customer's Last Message: "${customerMessage}" (Use this to detect their language).
     
     ADMIN INSTRUCTIONS FOR YOUR PERSONALITY:
     "${botSettings.systemPrompt}"
@@ -158,12 +154,11 @@ async function generateNaturalMessage(instruction, botSettings, customerName = "
     CRITICAL TASK: ${instruction}
     
     IMPORTANT RULES FOR THE RESPONSE:
-    - Respond DIRECTLY to the customer as a single flowing paragraph or a couple of short, chatty paragraphs. 
-    - NEVER format your response as a list with bullet points or bold labels like "Order ID: ", "Total:", etc. 
-    - Weave all the information (like Order ID, price, items, status) naturally into your conversational sentences.
-    - Example of what to avoid: "Order ID: 1234\\nStatus: Placed\\nTotal: Rs500"
-    - Example of what to do: "Oyaa order karapu plants tika hariyata add wuna! 🥰 Oyage order eka #1234 wenawa. Mulu bill eka Rs500i. Mama eka danma process karannamko! 🌸"
-    - Do NOT use JSON. Do NOT wrap in quotes. Just output the natural message.`;
+    1. LANGUAGE MATCHING: Detect if the customer's last message is in English, Sinhala (සිංහල), or Singlish (Sinhala written in English letters). You MUST reply in that EXACT same language.
+    2. TONE: Be warm, welcoming, and professional. Do NOT be overly cutesy, romantic, or use excessive emojis. Maintain a polite customer-assistant boundary.
+    3. FORMATTING (CRITICAL): NEVER write huge blocks of text or "novel-like" paragraphs. Use plenty of line breaks (Enters) to separate different pieces of information.
+    4. CLARITY: When showing order details (ID, Total, Weight), present them neatly so it's very easy to read at a glance.
+    5. NO JSON: Respond directly to the customer with your formatted text.`;
 
     try {
         const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
@@ -181,11 +176,11 @@ async function generateNaturalMessage(instruction, botSettings, customerName = "
         }, 30000);
 
         const data = await response.json();
-        if (!response.ok) return "Sorry, mama dan poddak busy! 🥺 Poddak idala message ekak danna.";
+        if (!response.ok) return "Sorry, our system is slightly busy. Please try again in a moment. 🌿";
         
-        return data.choices?.[0]?.message?.content?.trim() || "Hmm... mata therune na. 🥺";
+        return data.choices?.[0]?.message?.content?.trim() || "Sorry, I didn't quite get that. Could you please repeat? 🌿";
     } catch(error) {
-        return "Ayyoo, mage internet connection eka poddak awul. 🥺 Tikakin kiyannako!";
+        return "I'm experiencing a slight network issue. Please give me a moment and try again. 🌿";
     }
 }
 
@@ -215,7 +210,7 @@ function calculateCartData(cart, botSettings) {
 // ---------------------------------------------------------
 
 async function askAIAgent(userText, customerName, currentMenu, currentCart, recentOrders, botSettings) {
-  if (!OPENROUTER_API_KEY) return { reply: "Ayyoo, AI service eka wada naane! 🥺", action: "NONE" };
+  if (!OPENROUTER_API_KEY) return { reply: "AI service connection error.", action: "NONE" };
 
   const menuContext = currentMenu.length
     ? currentMenu.map(m => `Num: ${m.displayId} | ID: ${m.id} | Name: ${m.name} | Price: Rs${m.price}`).join("\n")
@@ -230,12 +225,12 @@ async function askAIAgent(userText, customerName, currentMenu, currentCart, rece
     ? recentOrders.map(o => `Order ID: ${makeOrderId(o.id)} | Status: ${o.status} | Total: Rs${o.total} | Items: ${o.items.map(i=>i.quantity+'x '+i.name).join(', ')}`).join("\n")
     : "No active or past orders.";
 
-  const systemPrompt = `You are ${botSettings.botName}, a sweet Sri Lankan teenage girl working at Magiflora.
+  const systemPrompt = `You are ${botSettings.botName}, a friendly and professional customer service assistant at Magiflora.
 Customer name: ${customerName}
+Customer's message: "${userText}"
 
 ADMIN INSTRUCTIONS FOR YOUR PERSONALITY/TONE:
 "${botSettings.systemPrompt}"
-NEVER SOUND LIKE A BOT. Be very natural, sweet, and conversational in Singlish/Sinhala.
 
 AVAILABLE CATALOG:
 ${menuContext}
@@ -243,7 +238,7 @@ ${menuContext}
 CUSTOMER'S CURRENT CART:
 ${cartContext}
 
-CUSTOMER'S RECENT ORDERS (Use this to answer status queries!):
+CUSTOMER'S RECENT ORDERS:
 ${ordersContext}
 
 CRITICAL INSTRUCTION:
@@ -251,7 +246,7 @@ You MUST reply with ONLY a raw JSON object. Do not include markdown formatting (
 
 JSON FORMAT REQUIRED:
 {
-  "reply": "Your completely natural, sweet teenage girl response.",
+  "reply": "Your carefully formatted, professional and friendly response.",
   "action": "NONE", 
   "actionDetails": [
     { "id": "id_from_catalog_here", "qty": 2 }
@@ -260,19 +255,18 @@ JSON FORMAT REQUIRED:
 
 VALID ACTIONS:
 - "ADD_TO_CART": If user wants to add items. You MUST include "actionDetails".
-- "CHECKOUT": If user wants to finalize order. (In your reply, sweetly ask for their full name to begin).
-- "VIEW_CART": If user asks what is in their cart or total. (Summarize the cart beautifully inside your reply without making it look like a list).
+- "CHECKOUT": If user wants to finalize order.
+- "VIEW_CART": If user asks what is in their cart or total.
 - "SHOW_MENU": If user asks to see plants or prices.
 - "CLEAR_CART": If user wants to cancel their cart.
-- "CHECK_STATUS": If user asks for order status, tracking, or history. (Check the 'RECENT ORDERS' context and tell them their status naturally inside your reply!).
+- "CHECK_STATUS": If user asks for order status. Check 'RECENT ORDERS' context.
 - "NONE": General chat.
 
-RULES:
-- Put ALL your conversational text inside "reply". Never send multiple messages. 
-- Make sure "reply" alone provides a full, beautiful answer to the customer in a conversational way. Do not output robotic lists.
-- Map item names or numbers to correct catalog ID in the "actionDetails" array.
-- CRITICAL: NEVER mention the internal catalog 'ID' (e.g., -Or8AZRfc...) to the customer in your "reply". If you need to refer to a plant, use ONLY its regular Name.
-- ALWAYS be sweet.`;
+RULES FOR "reply" FIELD:
+1. LANGUAGE MATCHING: You MUST reply in the EXACT same language the customer used (English, Sinhala, or Singlish).
+2. TONE: Professional, welcoming, and helpful. Do NOT be overly cutesy or affectionate.
+3. FORMATTING (CRITICAL): Ensure the text inside "reply" uses line breaks (\\n\\n) to separate sentences. NEVER send a massive unreadable block of text. Use spacing and simple emojis to make it neat.
+4. ITEM IDs: NEVER mention the internal catalog 'ID' (e.g., -Or8AZRfc...) to the customer. Use ONLY the plant's actual Name.`;
 
   try {
     const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
@@ -292,19 +286,19 @@ RULES:
     }, 30000);
 
     const data = await response.json();
-    if (!response.ok) return { reply: "Ayyoo, podi aulak una! 🥺 Tikakin try karannako.", action: "NONE" };
+    if (!response.ok) return { reply: "System is busy. Please try again.", action: "NONE" };
 
     let content = data.choices?.[0]?.message?.content || "";
     content = content.replace(/```json/gi, '').replace(/```/g, '').trim();
     
     const parsedData = JSON.parse(content);
     return {
-      reply: parsedData.reply || "Hmm... mata therune na. 🥺",
+      reply: parsedData.reply || "Sorry, I didn't quite catch that.",
       action: parsedData.action || "NONE",
       actionDetails: parsedData.actionDetails || []
     };
   } catch (error) {
-    return { reply: "Mage internet poddak awul wela! 🥺 Oya type karapu de mata awe na.", action: "NONE" };
+    return { reply: "Connection issue detected. Please try again.", action: "NONE" };
   }
 }
 
@@ -357,19 +351,18 @@ function listenOrderStatusChanges() {
 
             if (currentStatus !== "Placed" && currentStatus !== lastNotified) {
               const items = order.items?.map(i => `${i.quantity || 1}x ${i.name}`).join(", ") || "Your order";
-              messageToSend = await generateNaturalMessage(`The customer's order ${makeOrderId(id)} containing [${items}] has just changed its status to: '${currentStatus}'. Tell them this wonderful news very sweetly and naturally. Remember to weave the info into sentences, no lists.`, botSettings, order.customerName);
+              messageToSend = await generateNaturalMessage(`Order ${makeOrderId(id)} containing [${items}] has updated its status to: '${currentStatus}'. Notify the customer professionally but warmly. Format with clear line breaks.`, botSettings, order.customerName);
               updatePayload.lastNotifiedStatus = currentStatus;
               updatePayload.lastNotifiedAt = new Date().toISOString();
             } 
             else if (currentEditTimestamp > lastNotifiedEdit) {
-              messageToSend = await generateNaturalMessage(`We just updated the details for order ${makeOrderId(id)}. New details are - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Tell the customer sweetly that we updated their information so they don't worry. Avoid using list formats.`, botSettings, order.customerName);
+              messageToSend = await generateNaturalMessage(`Order ${makeOrderId(id)} details updated. New details - Name: ${order.customerName}, Address: ${order.address}, Phone: ${order.phone1}. Notify the customer nicely and use clear line breaks so it's easy to read.`, botSettings, order.customerName);
               updatePayload.lastNotifiedEditTimestamp = currentEditTimestamp;
             }
 
             if (messageToSend) {
               const jid = order.notifyJid || order.customerJid;
               if (jid) {
-                // Now safely using the global updated socket
                 await globalSock.sendMessage(jid, { text: messageToSend });
                 await firebasePatch(`orders/${id}`, updatePayload);
                 console.log(`✅ Natural status message sent to ${jid}`);
@@ -406,7 +399,7 @@ async function startBot() {
     browser: ["Magiflora AI", "Chrome", "2.0"]
   });
 
-  globalSock = sock; // Update the global socket reference!
+  globalSock = sock; 
 
   sock.ev.on("connection.update", update => {
     const { connection, lastDisconnect, qr } = update;
@@ -421,7 +414,7 @@ async function startBot() {
 
     if (connection === "open") {
       console.log("✅ Magiflora Natural AI Bot is ONLINE!");
-      listenOrderStatusChanges(); // Starts loop if not already running
+      listenOrderStatusChanges(); 
     }
 
     if (connection === "close") {
@@ -441,7 +434,7 @@ async function startBot() {
 
       const sender = msg.key.remoteJid;
       const customerWaNumber = cleanPhoneNumber(sender.split("@")[0]);
-      const customerName = msg.pushName || "Yaaluwa";
+      const customerName = msg.pushName || "Customer";
       const rawText = getMessageText(msg).trim();
       const text = rawText.toLowerCase();
 
@@ -453,13 +446,13 @@ async function startBot() {
       const currentMenu = await getMenuFromApp();
       const botSettings = await getBotSettings();
 
-      await sock.sendPresenceUpdate('composing', sender); // Makes it feel human
+      await sock.sendPresenceUpdate('composing', sender);
 
       // Cancel check
       if (text === "cancel" && session.step !== "IDLE") {
           session.step = "IDLE";
           session.checkoutData = {};
-          const reply = await generateNaturalMessage("The customer just cancelled the checkout process. Say 'no problem at all' sweetly and tell them they can look at the menu again anytime.", botSettings, customerName);
+          const reply = await generateNaturalMessage("The customer just cancelled the checkout process. Politely acknowledge this and mention they can view the menu anytime.", botSettings, customerName, rawText);
           await sock.sendMessage(sender, { text: reply });
           return;
       }
@@ -471,7 +464,7 @@ async function startBot() {
       if (session.step === "WAITING_FOR_NAME") {
           session.checkoutData.name = rawText;
           session.step = "WAITING_FOR_ADDRESS";
-          const reply = await generateNaturalMessage(`The customer just gave their name: ${rawText}. Say thank you and sweetly ask for their full delivery address so you can send the plants.`, botSettings, rawText);
+          const reply = await generateNaturalMessage(`Customer provided name: ${rawText}. Thank them professionally and ask for their full delivery address.`, botSettings, rawText, rawText);
           await sock.sendMessage(sender, { text: reply });
           return;
       }
@@ -479,7 +472,7 @@ async function startBot() {
       if (session.step === "WAITING_FOR_ADDRESS") {
           session.checkoutData.address = rawText;
           session.step = "WAITING_FOR_PHONE1";
-          const reply = await generateNaturalMessage(`The customer gave their address: ${rawText}. Thank them and ask for their primary phone number to contact them during delivery.`, botSettings, session.checkoutData.name);
+          const reply = await generateNaturalMessage(`Customer provided address: ${rawText}. Thank them and ask for their primary phone number for delivery purposes.`, botSettings, session.checkoutData.name, rawText);
           await sock.sendMessage(sender, { text: reply });
           return;
       }
@@ -487,7 +480,7 @@ async function startBot() {
       if (session.step === "WAITING_FOR_PHONE1") {
           session.checkoutData.phone1 = rawText;
           session.step = "WAITING_FOR_PHONE2";
-          const reply = await generateNaturalMessage(`The customer gave their phone number: ${rawText}. Say 'noted!' and sweetly ask if they have an alternate phone number just in case.`, botSettings, session.checkoutData.name);
+          const reply = await generateNaturalMessage(`Customer provided phone: ${rawText}. Acknowledge and ask if they have an alternate phone number just in case.`, botSettings, session.checkoutData.name, rawText);
           await sock.sendMessage(sender, { text: reply });
           return;
       }
@@ -534,18 +527,17 @@ async function startBot() {
             const saved = await firebasePost("orders", plantOrder);
             const orderId = saved?.name || "new";
 
-            const successPrompt = `The customer ${session.checkoutData.name} has successfully placed an order! Order ID is ${makeOrderId(orderId)}. The total weight is ${(totalWeightGrams / 1000).toFixed(2)}kg and the total bill (with delivery) is Rs${total.toFixed(2)}. They will pay by Cash on Delivery. 
+            const successPrompt = `Customer ${session.checkoutData.name} placed an order! Order ID is ${makeOrderId(orderId)}. Total weight: ${(totalWeightGrams / 1000).toFixed(2)}kg. Total bill: Rs${total.toFixed(2)}. Payment: Cash on Delivery. 
+            Thank them professionally. Present the order ID, weight, and total clearly with line spacing so it's easy to read at a glance, without writing a massive paragraph.`;
             
-            Thank them warmly and beautifully for ordering with Magiflora and tell them you are processing it right away! 
-            IMPORTANT: Weave the order ID, weight, and total bill into conversational sentences like "Ayyooo madu! 🥰 Thank you sooooo much... Oyage order eka #1234 wenawa. Mulu bill eka delivery ekkath ekka Rs26550 kiyala thiyenawa." DO NOT use lists or bold labels.`;
-            const reply = await generateNaturalMessage(successPrompt, botSettings, session.checkoutData.name);
+            const reply = await generateNaturalMessage(successPrompt, botSettings, session.checkoutData.name, rawText);
             await sock.sendMessage(sender, { text: reply });
             
             session.cart = [];
             session.checkoutData = {};
             session.step = "IDLE";
           } catch (error) {
-            const errReply = await generateNaturalMessage("Tell the customer there was a tiny system error saving the order and ask them to try again in a few minutes nicely.", botSettings, session.checkoutData.name);
+            const errReply = await generateNaturalMessage("Tell the customer there was a system error saving their order and apologize politely, asking to try again in a few minutes.", botSettings, session.checkoutData.name, rawText);
             await sock.sendMessage(sender, { text: errReply });
           }
           return;
@@ -555,9 +547,8 @@ async function startBot() {
       // AI Agent Parsing (Natural Language)
       // ==========================================
       
-      // Fetch recent orders to inject into AI memory! (This fixes the missing status issue)
       const allOrders = await getCustomerOrders(customerWaNumber, sender);
-      const recentOrders = allOrders.slice(0, 3); // Provide the 3 most recent orders for context
+      const recentOrders = allOrders.slice(0, 3);
       
       const aiResult = await askAIAgent(rawText, customerName, currentMenu, session.cart, recentOrders, botSettings);
       
@@ -577,7 +568,6 @@ async function startBot() {
           
           if(itemsAdded.length > 0) {
              let sentImages = 0;
-             // Send photos, but attach the AI's natural reply text to the VERY LAST photo
              for (let i = 0; i < itemsAdded.length; i++) {
                  let item = itemsAdded[i];
                  if (item.imageUrl) {
@@ -589,13 +579,11 @@ async function startBot() {
                      } catch (e) {}
                  }
              }
-             // Fallback if no images were available/sent
              if (sentImages === 0) {
                  await sock.sendMessage(sender, { text: aiResult.reply });
              }
           } else {
-             // Failed to match item ID, just send reply
-             await sock.sendMessage(sender, { text: `${aiResult.reply}\n(Poddak inna, mata ehema plant ekak hambune naane 🥺 Menu eke thiyena namama kiyannako)` });
+             await sock.sendMessage(sender, { text: `${aiResult.reply}` });
           }
       } 
       else if (aiResult.action === "CHECKOUT") {
@@ -609,8 +597,7 @@ async function startBot() {
       } 
       else if (aiResult.action === "SHOW_MENU") {
           if (currentMenu.length > 0) {
-              let menuStr = currentMenu.map(i => `🌸 ${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
-              // Append the menu nicely directly underneath the AI's reply, preventing a separate message popup
+              let menuStr = currentMenu.map(i => `🌿 ${i.displayId}. ${i.name} - Rs${i.price}`).join("\n");
               await sock.sendMessage(sender, { text: `${aiResult.reply}\n\n${menuStr}` });
           } else {
               await sock.sendMessage(sender, { text: aiResult.reply });
@@ -621,7 +608,6 @@ async function startBot() {
           await sock.sendMessage(sender, { text: aiResult.reply });
       }
       else {
-          // This safely handles VIEW_CART, CHECK_STATUS, and NONE intent natively via aiResult.reply
           await sock.sendMessage(sender, { text: aiResult.reply });
       }
 
